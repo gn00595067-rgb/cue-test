@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import subprocess
 import re
-from datetime import timedelta, datetime, date
+from datetime import timedelta, datetime
 from copy import copy
 
 import requests
@@ -17,7 +17,7 @@ from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment
 
 # =========================================================
-# 0. 基礎工具函式（必須放最前面）
+# 0) 基礎工具函式（必須放最前面）
 # =========================================================
 def parse_count_to_int(x):
     """將含有逗號的字串或數字轉為整數"""
@@ -31,7 +31,18 @@ def parse_count_to_int(x):
         return 0
     return int(m[0].replace(",", ""))
 
+def sanitize_text(s):
+    """清理不可見控制字元/替代字元，避免 PDF 亂碼、怪符號"""
+    if s is None:
+        return s
+    s = str(s)
+    s = s.replace("\uFFFD", "").replace("\uFFFE", "").replace("\ufeff", "")
+    s = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", s)  # 保留 \t \n
+    s = re.sub(r"[ ]{2,}", " ", s).strip()
+    return s
+
 def find_soffice_path():
+    """找 LibreOffice/soffice（雲端通常在 /usr/bin/soffice）"""
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice:
         return soffice
@@ -47,12 +58,12 @@ def find_soffice_path():
 
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     """
-    ✅最高擬真（跟 Excel 幾乎一致）的 PDF 方案：
-    1) Windows 本機：Excel COM ExportAsFixedFormat（最準）
-    2) Linux / Streamlit Cloud：LibreOffice headless convert（很準）
-    3) 都沒有 → 回傳 None（讓 UI 去 fallback）
+    PDF 最高擬真策略：
+    1) Windows 本機：Excel COM ExportAsFixedFormat（最像）
+    2) Linux / Streamlit Cloud：LibreOffice headless convert（很像）
+    3) 都沒有 → 回傳 None（讓 UI fallback）
     """
-    # 1) Windows：Excel COM（最準）
+    # 1) Windows：Excel COM（最像）
     if os.name == "nt":
         try:
             import win32com.client  # pip install pywin32
@@ -92,17 +103,30 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                 with open(xlsx_path, "wb") as f:
                     f.write(xlsx_bytes)
 
-                p = subprocess.run(
-                    [soffice, "--headless", "--nologo", "--convert-to", "pdf:calc_pdf_Export", "--outdir", tmp, xlsx_path],
-                    capture_output=True,
-                    text=True,
-                )
+                # ✅雲端穩定性關鍵：固定 UserInstallation profile（避免 lock / first-run wizard）
+                lo_profile = os.path.join(tmp, "lo_profile")
+                os.makedirs(lo_profile, exist_ok=True)
+
+                # file URI（Windows/Linux 都安全）
+                lo_uri = "file:///" + lo_profile.replace("\\", "/")
+
+                cmd = [
+                    soffice,
+                    "--headless", "--invisible", "--nologo", "--nofirststartwizard",
+                    "--norestore", "--nolockcheck",
+                    f"-env:UserInstallation={lo_uri}",
+                    "--convert-to", "pdf:calc_pdf_Export",
+                    "--outdir", tmp,
+                    xlsx_path
+                ]
+                p = subprocess.run(cmd, capture_output=True, text=True)
+
                 if p.returncode != 0:
                     return None, "libreoffice_fail", (p.stderr or p.stdout or "LibreOffice convert failed")
 
+                # 期待輸出 cue.pdf，但 LO 有時會輸出不同檔名
                 pdf_path = os.path.join(tmp, "cue.pdf")
                 if not os.path.exists(pdf_path):
-                    # 有時候 LibreOffice 會輸出成 cue.pdf 或 cue (1).pdf 類似
                     for fn in os.listdir(tmp):
                         if fn.lower().endswith(".pdf"):
                             pdf_path = os.path.join(tmp, fn)
@@ -134,8 +158,7 @@ def ensure_noto_tc_ttf():
 
 def html_to_pdf_weasyprint(html_str: str):
     """
-    ⚠️擬真度低於 Excel→PDF（因為不是照 Excel 引擎渲染）
-    只做最後 fallback
+    ⚠️擬真度一定低於 xlsx→pdf（這是最後 fallback）
     """
     try:
         from weasyprint import HTML, CSS
@@ -160,10 +183,7 @@ def html_to_pdf_weasyprint(html_str: str):
         font-family: 'NotoSansTC', sans-serif !important;
         font-size: 8pt;
     }}
-    table {{
-        width: 100%;
-        border-collapse: collapse;
-    }}
+    table {{ width: 100%; border-collapse: collapse; }}
     th, td {{
         border: 0.5pt solid #555;
         padding: 2px 3px;
@@ -171,13 +191,7 @@ def html_to_pdf_weasyprint(html_str: str):
         vertical-align: middle;
         white-space: nowrap;
     }}
-    thead th {{
-        background: #eaeaea;
-        font-weight: 700;
-    }}
-    tr {{
-        page-break-inside: avoid;
-    }}
+    tr {{ page-break-inside: avoid; }}
     """
     try:
         pdf_bytes = HTML(string=html_str).write_pdf(
@@ -189,9 +203,9 @@ def html_to_pdf_weasyprint(html_str: str):
         return None, f"PDF Render Error: {str(e)}"
 
 # =========================================================
-# 1. Streamlit 頁面設定 & 自動載入模板
+# 1) Streamlit 頁面設定 & 自動載入模板
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.0 (PDF/Excel 擬真度提升)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.1 (Cloud PDF 擬真提升)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -199,6 +213,7 @@ DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
 @st.cache_resource(ttl=600)
 def load_default_template():
     status_msg = []
+    # Google Drive（若權限可直連）
     if GOOGLE_DRIVE_FILE_ID:
         url = f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}"
         try:
@@ -209,8 +224,9 @@ def load_default_template():
                 else:
                     return r.content, "雲端硬碟 (Google Drive)", status_msg
         except Exception as e:
-            status_msg.append(f"❌ 連線錯誤: {e}")
+            status_msg.append(f"❌ Drive 連線錯誤: {e}")
 
+    # 本機檔（你本機測試用；雲端通常沒有）
     if os.path.exists(DEFAULT_FILENAME):
         try:
             with open(DEFAULT_FILENAME, "rb") as f:
@@ -221,7 +237,7 @@ def load_default_template():
     return None, None, status_msg
 
 # =========================================================
-# 2. CSS（預覽更像 Excel）
+# 2) CSS（預覽更像 Excel）
 # =========================================================
 st.markdown("""
 <style>
@@ -273,7 +289,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 3. 資料庫
+# 3) 資料庫
 # =========================================================
 STORE_COUNTS_RAW = {
     "全省": "4,437店",
@@ -285,7 +301,7 @@ STORE_COUNTS_RAW = {
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS_RAW.items()}
 
-# 2026：全家廣播以 6 區出表（你確認不是錯）
+# 2026：全家廣播以 6 區（你確認不是 bug）
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
@@ -318,10 +334,7 @@ def get_sec_factor(media_type, seconds):
     return SEC_FACTORS.get(media_type, {}).get(seconds, 1.0)
 
 def calculate_schedule(total_spots, days):
-    """
-    你這版的 schedule：先強制偶數，再「對半分配」後乘回 2
-    => 每天都會是偶數（符合一些投放規則）
-    """
+    """固定偶數、對半分配後乘回 2 => 每天都偶數"""
     if days <= 0:
         return []
     if total_spots % 2 != 0:
@@ -335,12 +348,12 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     d_str = sign_deadline.strftime("%Y/%m/%d (%a) %H:%M") if sign_deadline else "____/__/__ (__) 12:00"
     p_str = payment_date.strftime("%Y/%m/%d") if payment_date else "____/__/__"
     return [
-        f"1.請於 {d_str}前 回簽及進單，方可順利上檔。",
-        "2.以上節目名稱如有異動，以上檔時節目名稱為主，如遇時段滿檔，上檔時間挪後或更換至同級時段。",
-        "3.通路店鋪數與開機率開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。",
-        "4.託播方需於上檔前 5 個工作天，提供廣告帶(mp3)、影片/影像 1920x1080 (mp4)。",
-        f"5.雙方同意費用請款月份 : {billing_month}，如有修正必要，將另行E-Mail告知，並視為正式合約之一部分。",
-        f"6.付款兌現日期：{p_str}"
+        sanitize_text(f"1.請於 {d_str}前 回簽及進單，方可順利上檔。"),
+        sanitize_text("2.以上節目名稱如有異動，以上檔時節目名稱為主，如遇時段滿檔，上檔時間挪後或更換至同級時段。"),
+        sanitize_text("3.通路店鋪數與開機率開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。"),
+        sanitize_text("4.託播方需於上檔前 5 個工作天，提供廣告帶(mp3)、影片/影像 1920x1080 (mp4)。"),
+        sanitize_text(f"5.雙方同意費用請款月份 : {billing_month}，如有修正必要，將另行E-Mail告知，並視為正式合約之一部分。"),
+        sanitize_text(f"6.付款兌現日期：{p_str}")
     ]
 
 REGION_DISPLAY_6 = {
@@ -349,15 +362,10 @@ REGION_DISPLAY_6 = {
     "全省量販": "全省量販", "全省超市": "全省超市",
 }
 def region_display(region: str) -> str:
-    return REGION_DISPLAY_6.get(region, region)
+    return sanitize_text(REGION_DISPLAY_6.get(region, region))
 
 # =========================================================
-# 4. Excel 生成模組（openpyxl，模板填空）
-#    ✅ Excel 擬真度提升的關鍵點：
-#    - 嚴格依模板（含合併格、顏色、字型、欄寬）
-#    - 對 Dongwu：Day-part/Size/rate/pkg 只寫在每個「秒數區塊的第一列」
-#      避免誤寫到 merged-cell 子格造成主格被覆蓋/清空
-#    - 插列時用「區塊最後一列」當 pattern row，樣式/公式更接近原模板
+# 4) Excel 生成（openpyxl：模板填空）
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell):
@@ -419,7 +427,7 @@ def copy_row_with_style_fix(ws, src_row, dst_row, max_col):
             dc.value = v
 
 def force_center_columns_range(ws, col_letters, start_row, end_row):
-    """最後補強：確保某些欄位全部水平/垂直置中（含 merged master cell）"""
+    """最後補強：確保某些欄位全部置中（含 merged master cell）"""
     if start_row is None or end_row is None:
         return
     for r in range(start_row, end_row + 1):
@@ -520,20 +528,20 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     # Header
     hc = meta["header_cells"]
     if "client" in hc:
-        safe_write(ws, hc["client"], client_name)
+        safe_write(ws, hc["client"], sanitize_text(client_name))
     if "product" in hc:
-        safe_write(ws, hc["product"], product_display_str)
+        safe_write(ws, hc["product"], sanitize_text(product_display_str))
     if "period" in hc:
         safe_write(ws, hc["period"], f"{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y.%m. %d')}")
     if "medium" in hc:
-        safe_write(ws, hc["medium"], " ".join(sorted(set([r["media_type"] for r in rows]))))
+        safe_write(ws, hc["medium"], sanitize_text(" ".join(sorted(set([r["media_type"] for r in rows])))))
     if "month" in hc:
         safe_write(ws, hc["month"], f" {start_dt.month}月")
 
     safe_write(ws, meta["date_start_cell"], datetime(start_dt.year, start_dt.month, start_dt.day))
 
     for addr, text in meta.get("header_override", {}).items():
-        safe_write(ws, addr, text)
+        safe_write(ws, addr, sanitize_text(text))
 
     # 找 Total row
     total_cell = find_cell_exact(ws, meta["total_label"])
@@ -570,7 +578,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         "家樂福":   sorted([r for r in rows if r["media_type"] == "家樂福"], key=sort_key),
     }
 
-    # 插列：用區塊最後一列當 pattern row（比用 sr 更接近原樣式）
+    # 插列：用區塊最後一列當 pattern row（更接近原樣式）
     for k, sr, er in sorted(sec_ranges, key=lambda x: x[1], reverse=True):
         data = grouped.get(k, [])
         needed = len(data)
@@ -609,9 +617,9 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         name = "通路廣播廣告" if m == "全家廣播" else "新鮮視廣告" if m == "新鮮視" else "家樂福"
         if format_type == "Shenghuo" and m == "全家廣播":
             name = "廣播通路廣告"
-        return prefix + name
+        return sanitize_text(prefix + name)
 
-    # 將 data 按「秒數」分群（Dongwu 需要：每個秒數只在第一列寫 E/F/G/H）
+    # Dongwu：每個秒數區塊只在第一列寫 E/F/G/H（避免 merged-cell 子格覆寫）
     def group_by_seconds(data_list):
         by_sec = {}
         for r in data_list:
@@ -624,13 +632,11 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
 
     written_rows = []
 
-    # 寫入資料
     for m, sr, er in sec_ranges:
         data = grouped.get(m, [])
         if not data:
             continue
 
-        # Station merge
         if meta["station_merge"]:
             unmerge_col_overlap(ws, cols["station"], sr, er)
             merge_rng = f"{cols['station']}{sr}:{cols['station']}{sr + len(data) - 1}"
@@ -643,7 +649,6 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
 
         if format_type == "Dongwu":
             for sec_val, sec_rows in group_by_seconds(data):
-                # 每個秒數區塊：只在第一列寫 E/F/G/H（避免寫到 merged-cell 子格）
                 for idx, r in enumerate(sec_rows):
                     if not meta["station_merge"]:
                         c_station = ws[f"{cols['station']}{row_ptr}"]
@@ -654,28 +659,32 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                     safe_write(ws, f"{cols['program']}{row_ptr}", int(r.get("program_num", 0)))
 
                     if idx == 0:
-                        safe_write(ws, f"{cols['daypart']}{row_ptr}", r["daypart"])
+                        safe_write(ws, f"{cols['daypart']}{row_ptr}", sanitize_text(r["daypart"]))
                         if m == "家樂福":
-                            safe_write(ws, f"{cols['seconds']}{row_ptr}", f"{r['seconds']}秒")
+                            safe_write(ws, f"{cols['seconds']}{row_ptr}", sanitize_text(f"{r['seconds']}秒"))
                         else:
                             safe_write(ws, f"{cols['seconds']}{row_ptr}", int(r["seconds"]))
+
                         safe_write(ws, f"{cols['rate']}{row_ptr}", r.get("rate_list", ""))
                         safe_write(ws, f"{cols['pkg']}{row_ptr}", r.get("pkg_display_val", ""))
-                        # ✅對齊主格（如果模板有合併，safe_write 會寫到 master）
-                        apply_center_style(ws[f"{cols['daypart']}{row_ptr}"])
-                        apply_center_style(ws[f"{cols['seconds']}{row_ptr}"])
-                        apply_center_style(ws[f"{cols['rate']}{row_ptr}"])
-                        apply_center_style(ws[f"{cols['pkg']}{row_ptr}"])
 
-                    # schedule + 檔次
+                        # 置中保險（master cell）
+                        for kcol in (cols["daypart"], cols["seconds"], cols["rate"], cols["pkg"]):
+                            cc = ws[f"{kcol}{row_ptr}"]
+                            if isinstance(cc, MergedCell):
+                                mc = _get_master_cell(ws, cc)
+                                if mc:
+                                    cc = mc
+                            apply_center_style(cc)
+
                     set_schedule(ws, row_ptr, meta["schedule_start_col"], meta["max_days"], r["schedule"])
                     spot_sum = sum(r["schedule"][:meta["max_days"]])
                     safe_write(ws, f"{meta['total_col']}{row_ptr}", spot_sum)
 
                     written_rows.append(row_ptr)
                     row_ptr += 1
+
         else:
-            # Shenghuo：每列都寫完整
             for r in data:
                 if not meta["station_merge"]:
                     c_station = ws[f"{cols['station']}{row_ptr}"]
@@ -684,8 +693,8 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
 
                 safe_write(ws, f"{cols['location']}{row_ptr}", region_display(r["region"]))
                 safe_write(ws, f"{cols['program']}{row_ptr}", int(r.get("program_num", 0)))
-                safe_write(ws, f"{cols['daypart']}{row_ptr}", r["daypart"])
-                safe_write(ws, f"{cols['seconds']}{row_ptr}", f"{r['seconds']}秒廣告")
+                safe_write(ws, f"{cols['daypart']}{row_ptr}", sanitize_text(r["daypart"]))
+                safe_write(ws, f"{cols['seconds']}{row_ptr}", sanitize_text(f"{r['seconds']}秒廣告"))
                 safe_write(ws, f"{cols['proj_price']}{row_ptr}", r.get("pkg_display_val", 0) if isinstance(r.get("pkg_display_val", 0), int) else 0)
 
                 set_schedule(ws, row_ptr, meta["schedule_start_col"], meta["max_days"], r["schedule"])
@@ -729,19 +738,41 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     rem_pos = find_cell_exact(ws, "Remarks：")
     if rem_pos:
         for i, rm in enumerate(remarks_list):
-            safe_write_rc(ws, rem_pos[0] + 1 + i, rem_pos[1], rm)
+            safe_write_rc(ws, rem_pos[0] + 1 + i, rem_pos[1], sanitize_text(rm))
 
-    # 最後補強置中（避免你之前看到的 E/F/G/H 不置中）
+    # ✅補強置中（避免 E/F/G/H 不置中）
     if format_type == "Dongwu" and written_rows:
         min_r, max_r = min(written_rows), total_row
         force_center_columns_range(ws, meta["force_center_cols"], min_r, max_r)
+
+    # ✅PDF 擬真度關鍵：強制列印/縮放/print area（東吳 + 聲活 共用）
+    try:
+        ws.page_setup.orientation = "landscape"
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+
+        ws.page_margins.left = 0.2
+        ws.page_margins.right = 0.2
+        ws.page_margins.top = 0.2
+        ws.page_margins.bottom = 0.2
+        ws.page_margins.header = 0.1
+        ws.page_margins.footer = 0.1
+
+        last_col = meta["total_col"]
+        last_row = total_row + 20
+        if rem_pos:
+            last_row = max(last_row, rem_pos[0] + 10)
+        ws.print_area = f"A1:{last_col}{last_row}"
+    except:
+        pass
 
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
 
 # =========================================================
-# 5. HTML Preview（只做「畫面參考」；PDF 以 Excel→PDF 為主）
+# 5) HTML Preview（僅供網頁顯示；PDF 以 xlsx→pdf 為主）
 # =========================================================
 def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks):
     header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
@@ -754,10 +785,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     for _ in range(eff_days):
         wd = curr.weekday()
-        if format_type == "Dongwu" and wd >= 5:
-            bg = "bg-weekend"
-        else:
-            bg = header_cls
+        bg = "bg-weekend" if (format_type == "Dongwu" and wd >= 5) else header_cls
         if format_type == "Shenghuo":
             bg = header_cls
         date_headers_1 += f"<th class='{bg}'>{curr.day}</th>"
@@ -807,13 +835,14 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
             tbody += f"<td class='align-right'>{int(r.get('program_num', 0)):,}</td>"
 
             if key != last_key:
-                tbody += f"<td>{r['daypart']}</td>"
+                tbody += f"<td>{sanitize_text(r['daypart'])}</td>"
                 sec_txt = f"{r['seconds']}秒" if m == "家樂福" else f"{int(r['seconds'])}"
-                tbody += f"<td>{sec_txt}</td>"
+                tbody += f"<td>{sanitize_text(sec_txt)}</td>"
+
                 rate = r.get("rate_list", "")
                 pkg = r.get("pkg_display_val", "")
-                rate_disp = f"{rate:,}" if isinstance(rate, int) else str(rate)
-                pkg_disp = f"{pkg:,}" if isinstance(pkg, int) else str(pkg)
+                rate_disp = f"{rate:,}" if isinstance(rate, int) else sanitize_text(str(rate))
+                pkg_disp = f"{pkg:,}" if isinstance(pkg, int) else sanitize_text(str(pkg))
                 tbody += f"<td class='align-right'>{rate_disp}</td>"
                 tbody += f"<td class='align-right'>{pkg_disp}</td>"
             else:
@@ -825,15 +854,14 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
             last_key = key
 
         else:
-            # Shenghuo：每列都顯示 station
             display_name = "全家便利商店<br>廣播通路廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
             tbody += f"<td class='align-left'>{display_name}</td>"
             tbody += f"<td>{region_display(r['region'])}</td>"
             tbody += f"<td class='align-right'>{int(r.get('program_num', 0)):,}</td>"
-            tbody += f"<td>{r['daypart']}</td>"
-            tbody += f"<td>{r['seconds']}秒廣告</td>"
+            tbody += f"<td>{sanitize_text(r['daypart'])}</td>"
+            tbody += f"<td>{sanitize_text(str(r['seconds']) + '秒廣告')}</td>"
             pkg = r.get("pkg_display_val", 0)
-            pkg_disp = f"{pkg:,}" if isinstance(pkg, int) else str(pkg)
+            pkg_disp = f"{pkg:,}" if isinstance(pkg, int) else sanitize_text(str(pkg))
             tbody += f"<td class='align-right'>{pkg_disp}</td>"
             for d in r["schedule"][:eff_days]:
                 tbody += f"<td>{d}</td>"
@@ -847,18 +875,17 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         tfoot = f"<tr class='bg-total'><td colspan='5' class='align-left'>Total</td><td></td><td class='align-right'>{total_pkg:,}</td>"
     else:
         tfoot = f"<tr class='bg-total'><td colspan='5' class='align-left'>Total</td><td class='align-right'>{total_pkg:,}</td>"
-
     for t in totals:
         tfoot += f"<td>{t}</td>"
     tfoot += f"<td>{total_spots}</td></tr>"
 
     remarks_html = "<div style='margin-top:10px; font-size:12px; line-height:1.6; border-top:2px solid #000; padding-top:8px; text-align:left;'>" \
-                   "<b style='text-decoration:underline;'>Remarks：</b><br>" + "<br>".join(remarks) + "</div>"
+                   "<b style='text-decoration:underline;'>Remarks：</b><br>" + "<br>".join([sanitize_text(x) for x in remarks]) + "</div>"
 
     return f"""
     <div class="preview-wrapper">
       <div style="margin-bottom:8px;">
-        <b>客戶：</b>{c_name} &nbsp; <b>產品：</b>{p_display}<br>
+        <b>客戶：</b>{sanitize_text(c_name)} &nbsp; <b>產品：</b>{sanitize_text(p_display)}<br>
         <span style="color:#666;">走期：{start_dt} ~ {end_dt}</span>
       </div>
       <table class="excel-table">
@@ -867,9 +894,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
             {th_fixed}{date_headers_1}
             <th class="{header_cls}" rowspan="2">檔次</th>
           </tr>
-          <tr>
-            {date_headers_2}
-          </tr>
+          <tr>{date_headers_2}</tr>
         </thead>
         <tbody>
           {tbody}
@@ -881,9 +906,9 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     """
 
 # =========================================================
-# 6. UI Main
+# 6) UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.0：PDF/Excel 擬真度提升)")
+st.title("📺 媒體 Cue 表生成器 (v63.1：雲端 PDF 擬真提升)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -936,7 +961,6 @@ rem_budget = 100
 
 with m1:
     if st.checkbox("全家廣播", True):
-        # ✅這裡保留你現況：勾「全省聯播」代表仍用 6 區出表
         is_nat = st.checkbox("全省聯播（以6區出表）", True, key="rad_nat")
         regs = REGIONS_ORDER if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
@@ -998,9 +1022,6 @@ with m3:
 rows = []
 debug_logs = []
 
-# =========================================================
-# 7. 計算引擎（沿用你 Gemini 的邏輯）
-# =========================================================
 if config:
     for m, cfg in config.items():
         m_budget = total_budget_input * (cfg["share"] / 100.0)
@@ -1044,7 +1065,6 @@ if config:
                 for r in display_regs:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
-
                     rows.append({
                         "media_type": m,
                         "region": r,
@@ -1078,7 +1098,6 @@ if config:
                 })
 
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
-
                 rows.append({
                     "media_type": m,
                     "region": "全省量販",
@@ -1093,7 +1112,6 @@ if config:
 
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
-
                 rows.append({
                     "media_type": m,
                     "region": "全省超市",
@@ -1106,7 +1124,6 @@ if config:
                     "pkg_display_val": "計量販"
                 })
 
-# 顯示字串
 p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}" if rows else ""
 rem = get_remarks_text(sign_deadline, billing_month, payment_date)
 
@@ -1119,9 +1136,6 @@ with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
             unsafe_allow_html=True
         )
 
-# =========================================================
-# 8. 預覽 + 下載
-# =========================================================
 if rows:
     html = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem)
     st.components.v1.html(html, height=720, scrolling=True)
@@ -1133,17 +1147,17 @@ if rows:
             st.download_button(
                 "📥 下載 Excel（模板擬真版）",
                 xlsx_bytes,
-                file_name=f"Cue_{client_name}_{format_type}.xlsx",
+                file_name=f"Cue_{sanitize_text(client_name)}_{format_type}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            # ✅ PDF：優先用 Excel→PDF（擬真度最高），失敗才 fallback WeasyPrint
+            # ✅PDF：優先 xlsx→pdf（最像），失敗才 fallback WeasyPrint
             pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx_bytes)
             if pdf_bytes:
                 st.download_button(
                     f"📄 下載 PDF（{method}：擬真度高）",
                     pdf_bytes,
-                    file_name=f"Cue_{client_name}_{format_type}.pdf",
+                    file_name=f"Cue_{sanitize_text(client_name)}_{format_type}.pdf",
                     mime="application/pdf"
                 )
                 st.caption(f"PDF 產生方式：{method}")
@@ -1154,21 +1168,18 @@ if rows:
                     st.download_button(
                         "📄 下載 PDF（WeasyPrint fallback）",
                         pdf2,
-                        file_name=f"Cue_{client_name}_{format_type}.pdf",
+                        file_name=f"Cue_{sanitize_text(client_name)}_{format_type}.pdf",
                         mime="application/pdf"
                     )
-                    st.caption("若你要 PDF 幾乎 100% 像 Excel：請在本機用 Excel COM，或在 Streamlit Cloud 安裝 LibreOffice。")
                 else:
                     st.error(f"PDF 產出失敗：{err} | fallback：{err2}")
 
-            st.info(
-                "✅ 要讓 PDF 幾乎 100% 像 Excel：\n"
-                "- 本機 Windows：安裝 Excel + `pip install pywin32`（會自動走 Excel COM）\n"
-                "- Streamlit Cloud：在 repo 放 `packages.txt`：\n"
-                "  - libreoffice\n"
-                "  - fonts-noto-cjk\n"
-                "（Cloud 會自動 apt 安裝，PDF 就會走 LibreOffice，擬真度大幅提升）"
-            )
+            # 小提示：雲端是否有 soffice
+            soffice = find_soffice_path()
+            if soffice:
+                st.caption(f"✅ 雲端偵測到 LibreOffice: {soffice}")
+            else:
+                st.caption("⚠️ 雲端未偵測到 LibreOffice/soffice（若你有 packages.txt 安裝，重新部署後會出現）")
 
         except Exception as e:
             st.error(f"Excel 產出錯誤: {e}")
@@ -1176,4 +1187,3 @@ if rows:
         st.warning("請上傳模板以啟用下載。")
 else:
     st.info("請先設定媒體/秒數/預算，系統才會產生 Cue 表。")
-
