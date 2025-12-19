@@ -17,41 +17,53 @@ from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 
 # =========================================================
-# 0. 基礎設定 & 自動載入設定
+# 0. 基礎設定 & 強力自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v61.4 (Drive Linked)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v61.5 (Dual-Mode Load)")
 
-# ---------------------------------------------------------
-# [設定區] Google Drive 自動連結
-# ---------------------------------------------------------
-# 您提供的連結 ID
+# 您的檔案 ID
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
 
-@st.cache_resource(ttl=3600)
+@st.cache_resource(ttl=600)
 def load_default_template():
-    # 1. 優先嘗試從 Google Drive 下載
+    status_msg = []
+    
+    # 1. 雲端下載嘗試
     if GOOGLE_DRIVE_FILE_ID:
-        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
-        try:
-            r = requests.get(url, timeout=15)
-            if r.status_code == 200:
-                # 簡單檢查內容是否為 HTML (代表下載失敗或權限不足)
-                if b"<!DOCTYPE html>" in r.content[:200]:
-                    print("Drive download returned HTML (Permission/Auth error).")
-                else:
-                    return r.content, "雲端硬碟 (Google Drive)"
-        except Exception as e:
-            print(f"Drive connection error: {e}")
+        # 模式 A: 針對上傳的 Excel 檔案 (Binary Download)
+        url_binary = f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}"
+        # 模式 B: 針對原生 Google Sheets (Export)
+        url_export = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
+        
+        urls_to_try = [
+            ("Binary Mode", url_binary),
+            ("Export Mode", url_export)
+        ]
 
-    # 2. 備案：檢查本地檔案 (GitHub Repo 內)
+        for mode, url in urls_to_try:
+            try:
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    # 檢查檔頭：Excel 檔通常以 'PK' 開頭 (Zip)，HTML 則是 '<!DOCTYPE'
+                    content_start = r.content[:50]
+                    if b"<!DOCTYPE" in content_start or b"<html" in content_start:
+                        status_msg.append(f"❌ {mode}: 下載到網頁而非檔案 (請確認權限是否為「知道連結者均可檢視」)")
+                    else:
+                        return r.content, f"雲端硬碟 ({mode})", status_msg
+                else:
+                    status_msg.append(f"❌ {mode}: HTTP {r.status_code}")
+            except Exception as e:
+                status_msg.append(f"❌ {mode}: 連線錯誤 {e}")
+
+    # 2. 本地備援
     if os.path.exists(DEFAULT_FILENAME):
         try:
             with open(DEFAULT_FILENAME, "rb") as f:
-                return f.read(), "系統主機 (Local)"
+                return f.read(), "系統主機 (Local)", status_msg
         except: pass
-
-    return None, None
+    
+    return None, None, status_msg
 
 st.markdown("""
 <style>
@@ -224,6 +236,7 @@ def safe_write_rc(ws, row: int, col: int, value):
     cell.value = value
 
 def apply_center_style(cell):
+    """ 強制置中 + 自動換行 """
     existing_align = cell.alignment
     cell.alignment = Alignment(
         horizontal="center", 
@@ -233,6 +246,7 @@ def apply_center_style(cell):
     )
 
 def copy_row_with_style_fix(ws, src_row, dst_row, max_col):
+    """ 精準複製列樣式 """
     ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
     row_shift = dst_row - src_row
     for c in range(1, max_col + 1):
@@ -477,7 +491,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 5. HTML to PDF
+# 5. HTML to PDF via WeasyPrint
 # =========================================================
 def html_to_pdf_weasyprint(html_str):
     try: 
@@ -647,9 +661,9 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v61.4: Cloud Auto-Load)")
+st.title("📺 媒體 Cue 表生成器 (v61.5)")
 
-auto_tpl, source = load_default_template()
+auto_tpl, source, msgs = load_default_template()
 template_bytes = None
 
 if auto_tpl:
@@ -660,6 +674,10 @@ if auto_tpl:
         if tpl: template_bytes = tpl.read()
 else:
     st.warning("⚠️ 尚未偵測到公版檔案，請手動上傳")
+    if msgs:
+        with st.expander("🔍 下載失敗原因診斷"):
+            for m in msgs: st.write(m)
+            
     tpl = st.file_uploader("上傳 Excel 模板 (1209-Cue表相關資料.xlsx)", type=["xlsx"])
     if tpl: template_bytes = tpl.read()
 
