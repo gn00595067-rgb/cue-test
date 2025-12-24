@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import subprocess
 import re
+import base64
 from datetime import timedelta, datetime, date
 from copy import copy
 
@@ -37,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.3 (UI Refined)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.4 (Final Merge)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -66,51 +67,102 @@ def load_default_template():
     return None, None, status_msg
 
 # =========================================================
-# 2. CSS 樣式
+# 2. 高擬真 CSS 生成器 (這是讓 PDF 像 Excel 的關鍵)
 # =========================================================
-st.markdown("""
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap');
-  .stApp { background-color: #f4f4f4; font-family: 'Noto Sans TC', sans-serif; }
-  
-  .preview-wrapper {
-      background: #fff;
-      padding: 15px;
-      border: 1px solid #ccc;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-      margin-bottom: 20px;
-      overflow-x: auto;
-      white-space: nowrap;
-  }
+def build_preview_css(format_type: str, for_pdf: bool, font_base64: str | None):
+    # PDF 用 pt (點) 單位，Preview 用 px
+    if for_pdf:
+        unit = "pt"
+        border = "0.5pt"
+        pad = "2pt"
+        fs = "8pt"          # 字體縮小以塞入 A4
+        head_fs = "8pt"
+        row_h = "14pt"
+        # 定義跟 Excel 差不多的欄寬比例
+        fixed_w_station = "90pt"
+        fixed_w_loc = "75pt"
+        fixed_w_prog = "50pt"
+        fixed_w_daypart = "65pt"
+        fixed_w_size = "35pt"
+        fixed_w_rate = "60pt"
+        fixed_w_pkg = "70pt"
+        fixed_w_total = "40pt"
+        day_w = "14pt"
+        page_margin = "0.5cm"
+    else:
+        unit = "px"
+        border = "1px"
+        pad = "4px"
+        fs = "12px"
+        head_fs = "12px"
+        row_h = "24px"
+        fixed_w_station = "140px"
+        fixed_w_loc = "120px"
+        fixed_w_prog = "72px"
+        fixed_w_daypart = "96px"
+        fixed_w_size = "52px"
+        fixed_w_rate = "92px"
+        fixed_w_pkg = "110px"
+        fixed_w_total = "60px"
+        day_w = "22px"
+        page_margin = "10px"
 
-  table.excel-table {
-      border-collapse: collapse;
-      font-size: 12px;
-      min-width: 100%;
-      color: #000;
-      font-family: 'Arial', sans-serif;
-  }
+    head_bg = "#4472C4" if format_type == "Dongwu" else "#BDD7EE"
+    head_fg = "#FFFFFF" if format_type == "Dongwu" else "#000000"
+    weekend_bg = "#FFD966"
+    total_bg = "#FFF2CC"
 
-  .excel-table th, .excel-table td {
-      border: 1px solid #999;
-      padding: 4px 6px;
-      text-align: center;
-      vertical-align: middle;
-      height: 22px;
-  }
+    font_face = ""
+    font_family = "NotoSansTC, Arial, sans-serif"
+    if font_base64 and for_pdf:
+        font_face = f"""
+        @font-face {{
+            font-family: 'NotoSansTC';
+            src: url(data:font/ttf;base64,{font_base64}) format('truetype');
+        }}
+        """
+        font_family = "'NotoSansTC', sans-serif"
 
-  .excel-table thead th { position: sticky; top: 0; z-index: 10; border-bottom: 2px solid #000; }
-  
-  .bg-dw-head { background-color: #4472C4; color: white; font-weight: bold; }
-  .bg-sh-head { background-color: #BDD7EE; color: black; font-weight: bold; }
-  .bg-weekend { background-color: #FFD966; color: black; }
-  .bg-total   { background-color: #FFF2CC; font-weight: bold; }
-  
-  .align-left { text-align: left !important; padding-left: 5px !important; }
-  .align-right { text-align: right !important; padding-right: 5px !important; font-family: Consolas, monospace; }
-  .merged-cell { background-color: #fff; font-weight: bold; vertical-align: middle; }
-</style>
-""", unsafe_allow_html=True)
+    # PDF 關鍵：@page landscape
+    page_css = f"@page {{ size: A4 landscape; margin: {page_margin}; }}" if for_pdf else ""
+    
+    # 凍結窗格 (只在網頁版)
+    sticky = "" if for_pdf else "position: sticky; top: 0; z-index: 10;"
+
+    return f"""
+    {font_face}
+    {page_css}
+    body {{ margin: 0; font-family: {font_family}; font-size: {fs}; color: #000; }}
+    .wrap {{ background: #fff; padding: {('0' if for_pdf else '10px')}; }}
+    table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
+    th, td {{ 
+        border: {border} solid #555; 
+        padding: {pad}; 
+        height: {row_h}; 
+        vertical-align: middle; 
+        text-align: center; 
+        white-space: nowrap; 
+        overflow: hidden; 
+    }}
+    thead th {{ {sticky} background: {head_bg}; color: {head_fg}; font-weight: 700; font-size: {head_fs}; }}
+    .wknd {{ background: {weekend_bg} !important; color: #000 !important; }}
+    .total {{ background: {total_bg}; font-weight: 700; }}
+    .left {{ text-align: left !important; padding-left: 4px !important; }}
+    .right {{ text-align: right !important; padding-right: 4px !important; font-family: Consolas, monospace; }}
+    .remarks {{ margin-top: 10px; font-size: {fs}; line-height: 1.4; text-align: left; }}
+    .meta {{ margin-bottom: 10px; font-size: {head_fs}; text-align: left; }}
+    
+    /* 欄寬控制 */
+    .col_station {{ width: {fixed_w_station}; }}
+    .col_loc     {{ width: {fixed_w_loc}; }}
+    .col_prog    {{ width: {fixed_w_prog}; }}
+    .col_daypart {{ width: {fixed_w_daypart}; }}
+    .col_size    {{ width: {fixed_w_size}; }}
+    .col_rate    {{ width: {fixed_w_rate}; }}
+    .col_pkg     {{ width: {fixed_w_pkg}; }}
+    .col_day     {{ width: {day_w}; }}
+    .col_total   {{ width: {fixed_w_total}; }}
+    """
 
 # =========================================================
 # 3. 資料庫
@@ -438,123 +490,123 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 5. HTML to PDF via WeasyPrint
+# 5. HTML to PDF via WeasyPrint (with High-Fi CSS)
 # =========================================================
-def html_to_pdf_weasyprint(html_str):
+def html_to_pdf_weasyprint(html_str, font_b64):
     try: 
         from weasyprint import HTML, CSS
         from weasyprint.text.fonts import FontConfiguration
     except ImportError: return None, "WeasyPrint not installed"
     
-    font_path = "NotoSansTC-Regular.ttf"
-    if not os.path.exists(font_path):
-        try:
-            r = requests.get("https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTF/TraditionalChinese/NotoSansTC-Regular.ttf", timeout=15)
-            if r.status_code == 200: 
-                with open(font_path, "wb") as f: f.write(r.content)
-        except: pass
-        
     font_config = FontConfiguration()
-    css_str = f"""
-    @page {{
-        size: A4 landscape;
-        margin: 0.5cm;
-    }}
-    @font-face {{ font-family: 'NotoSansTC'; src: url(file://{os.path.abspath(font_path)}); }}
-    body {{ 
-        font-family: 'NotoSansTC', sans-serif !important; 
-        font-size: 8pt; 
-    }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ border: 0.5pt solid #555; padding: 2px; text-align: center; white-space: nowrap; }}
-    
-    .bg-dw-head {{ background-color: #4472C4; color: white; }}
-    .bg-sh-head {{ background-color: #BDD7EE; color: black; }}
-    .bg-weekend {{ background-color: #FFD966; }}
-    .bg-total   {{ background-color: #FFF2CC; }}
-    .align-left {{ text-align: left; }}
-    .align-right {{ text-align: right; }}
-    tr {{ page-break-inside: avoid; }}
-    """
+    # 關鍵：這裡把高擬真 CSS (build_preview_css) 再注入一次給 PDF
+    css_pdf = build_preview_css("Dongwu", for_pdf=True, font_base64=font_b64)
     
     try:
-        pdf_bytes = HTML(string=html_str).write_pdf(stylesheets=[CSS(string=css_str)], font_config=font_config)
+        pdf_bytes = HTML(string=html_str).write_pdf(stylesheets=[CSS(string=css_pdf)], font_config=font_config)
         return pdf_bytes, ""
     except Exception as e:
         return None, f"PDF Render Error: {str(e)}"
 
 # =========================================================
-# 6. HTML Preview
+# 6. HTML 生成器 (含 CSS)
 # =========================================================
-def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks):
-    header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
-    media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
-    eff_days = min(days_cnt, 31)
+def load_font_base64():
+    font_path = "NotoSansTC-Regular.ttf"
+    if os.path.exists(font_path):
+        with open(font_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
     
-    date_headers_1 = ""
-    date_headers_2 = ""
+    url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTF/TraditionalChinese/NotoSansTC-Regular.ttf"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            with open(font_path, "wb") as f: f.write(r.content)
+            return base64.b64encode(r.content).decode("utf-8")
+    except: pass
+    return None
+
+def generate_html(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, for_pdf, font_base64):
+    css = build_preview_css(format_type, for_pdf, font_base64)
+    
+    eff_days = min(days_cnt, 31)
+    date_th1, date_th2 = "", ""
     curr = start_dt
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    
     for i in range(eff_days):
         wd = curr.weekday()
-        bg = "bg-weekend" if (format_type == "Dongwu" and wd >= 5) else header_cls
-        if format_type == "Shenghuo": bg = header_cls 
-        date_headers_1 += f"<th class='{bg}'>{curr.day}</th>"
-        date_headers_2 += f"<th class='{bg}'>{weekdays[wd]}</th>"
+        bg = "wknd" if (format_type == "Dongwu" and wd >= 5) else ""
+        date_th1 += f"<th class='{bg} col_day'>{curr.day}</th>"
+        date_th2 += f"<th class='{bg} col_day'>{weekdays[wd]}</th>"
         curr += timedelta(days=1)
 
     if format_type == "Dongwu":
         cols_def = ["Station", "Location", "Program", "Day-part", "Size", "rate<br>(List)", "Package<br>(List)"]
     else:
         cols_def = ["頻道", "播出地區", "播出店數", "播出時間", "秒數<br>規格", "專案價"]
-    th_fixed = "".join([f"<th class='{header_cls}' rowspan='2'>{c}</th>" for c in cols_def])
     
+    th_fixed = "".join([f"<th rowspan='2'>{c}</th>" for c in cols_def])
+    
+    media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
     rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media_type"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
+    
     tbody = ""
-    media_group_counts = {}
-    for r in rows_sorted:
-        m = r["media_type"]
-        media_group_counts[m] = media_group_counts.get(m, 0) + 1
-    media_printed = {m: False for m in media_group_counts}
+    media_counts = {}
+    for r in rows_sorted: media_counts[r["media_type"]] = media_counts.get(r["media_type"], 0) + 1
+    media_printed = {m: False for m in media_counts}
 
     for r in rows_sorted:
         m = r["media_type"]
         tbody += "<tr>"
-        if not media_printed[m]:
-            rowspan = media_group_counts[m]
-            display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
-            if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
-            if format_type == "Shenghuo": tbody += f"<td>{display_name}</td>"
-            else: tbody += f"<td rowspan='{rowspan}'>{display_name}</td>"; media_printed[m] = True
-        elif format_type == "Shenghuo":
-             display_name = "全家便利商店<br>廣播通路廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
-             tbody += f"<td>{display_name}</td>"
+        
+        display_name = "全家便利商店<br>通路廣播廣告" if m=="全家廣播" else "全家便利商店<br>新鮮視廣告" if m=="新鮮視" else "家樂福"
+        if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
 
-        tbody += f"<td>{region_display(r['region'])}</td><td class='align-right'>{r.get('program_num','')}</td><td>{r['daypart']}</td>"
+        if format_type == "Shenghuo":
+            tbody += f"<td class='left'>{display_name}</td>"
+        else:
+            if not media_printed[m]:
+                tbody += f"<td class='left' rowspan='{media_counts[m]}'>{display_name}</td>"
+                media_printed[m] = True
+        
+        tbody += f"<td>{region_display(r['region'])}</td><td class='right'>{r.get('program_num','')}</td><td>{r['daypart']}</td>"
         sec_txt = f"{r['seconds']}秒" if format_type=="Dongwu" and m=="家樂福" else f"{r['seconds']}" if format_type=="Dongwu" else f"{r['seconds']}秒廣告"
         tbody += f"<td>{sec_txt}</td>"
+        
         rate = f"{r['rate_list']:,}" if isinstance(r['rate_list'], int) else r['rate_list']
         pkg = f"{r['pkg_display_val']:,}" if isinstance(r['pkg_display_val'], int) else r['pkg_display_val']
-        if format_type == "Dongwu": tbody += f"<td class='align-right'>{rate}</td><td class='align-right'>{pkg}</td>"
-        else: tbody += f"<td class='align-right'>{pkg}</td>"
+        
+        if format_type == "Dongwu": tbody += f"<td class='right'>{rate}</td><td class='right'>{pkg}</td>"
+        else: tbody += f"<td class='right'>{pkg}</td>"
         
         for d in r['schedule'][:eff_days]: tbody += f"<td>{d}</td>"
-        tbody += f"<td class='bg-total'>{sum(r['schedule'])}</td></tr>"
+        tbody += f"<td class='total'>{sum(r['schedule'])}</td></tr>"
 
     totals = [sum([r["schedule"][d] for r in rows if d < len(r["schedule"])]) for d in range(eff_days)]
-    total_spots = sum(totals)
     total_pkg = sum([r["pkg_display_val"] for r in rows if isinstance(r["pkg_display_val"], int)])
-    colspan = 5; empty_td = "<td></td>" if format_type == "Dongwu" else ""
-    tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='align-left'>Total</td>{empty_td}<td class='align-right'>{total_pkg:,}</td>"
+    colspan = 5
+    empty_td = "<td></td>" if format_type == "Dongwu" else ""
+    tfoot = f"<tr class='total'><td colspan='{colspan}' class='left'>Total</td>{empty_td}<td class='right'>{total_pkg:,}</td>"
     for t in totals: tfoot += f"<td>{t}</td>"
-    tfoot += f"<td>{total_spots}</td></tr>"
+    tfoot += f"<td>{sum(totals)}</td></tr>"
 
-    return f"""<div class="excel-container"><div style="margin-bottom:10px;"><b>客戶：</b>{c_name} &nbsp; <b>產品：</b>{p_display}<br><span style="color:#666;">走期：{start_dt} ~ {end_dt}</span></div><table class="excel-table"><thead><tr>{th_fixed}{date_headers_1}<th class='{header_cls}' rowspan='2'>檔次</th></tr><tr>{date_headers_2}</tr></thead><tbody>{tbody}{tfoot}</tbody></table><div class="remarks"><b>Remarks：</b><br>{"<br>".join(remarks)}</div></div>"""
+    remarks_html = "<div class='remarks'><b>Remarks：</b><br>" + "<br>".join(remarks) + "</div>"
+    
+    return f"""<html><head><meta charset='utf-8'><style>{css}</style></head><body><div class='wrap'><div class='meta'><b>客戶：</b>{c_name} &nbsp; <b>產品：</b>{p_display}<br><span style='color:#666'>走期：{start_dt} ~ {end_dt}</span></div><table>{build_colgroup(format_type, eff_days)}<thead><tr>{th_fixed}{date_th1}<th rowspan='2'>檔次</th></tr><tr>{date_th2}</tr></thead><tbody>{tbody}{tfoot}</tbody></table>{remarks_html}</div></body></html>"""
+
+def build_colgroup(format_type, days):
+    cols = ["col_station", "col_loc", "col_prog", "col_daypart", "col_size", "col_rate", "col_pkg"] if format_type=="Dongwu" else ["col_station", "col_loc", "col_prog", "col_daypart", "col_size", "col_pkg"]
+    html = "<colgroup>"
+    for c in cols: html += f"<col class='{c}'>"
+    for _ in range(days): html += "<col class='col_day'>"
+    html += "<col class='col_total'></colgroup>"
+    return html
 
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.3: UI Refined)")
+st.title("📺 媒體 Cue 表生成器 (v63.4)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -589,57 +641,37 @@ with st.expander("📝 備註欄位設定 (Remarks)", expanded=False):
 
 st.markdown("### 3. 媒體投放設定")
 
-# ---------------------------------------------------------
-# 🔥 重構後的媒體選擇 UI (Checkboxes 在上方，Details 在下方)
-# ---------------------------------------------------------
-
 # 1. 狀態初始化
 if "rad_share" not in st.session_state: st.session_state.rad_share = 100
 if "fv_share" not in st.session_state: st.session_state.fv_share = 0
 if "cf_share" not in st.session_state: st.session_state.cf_share = 0
 
-# 2. 自動平衡邏輯 (Callback)
+# 2. 自動平衡 Callback
 def on_media_change():
-    # 這裡只處理「當勾選狀態改變時」的平衡邏輯
-    # (實際上因為 checkbox 是直接綁定 session state，
-    #  我們可以在 rerun 後直接檢查哪些被勾選，然後調整 slider 值)
-    
-    # 取得目前被勾選的媒體
     active = []
     if st.session_state.get("cb_rad"): active.append("rad_share")
     if st.session_state.get("cb_fv"): active.append("fv_share")
     if st.session_state.get("cb_cf"): active.append("cf_share")
     
-    if not active: return # 都沒選
-    
-    # 重新分配 (簡單平均，或者保留原值但 normalize)
-    # 這裡採用「平均分配」策略，讓使用者知道狀態重置了，體驗比較明確
+    if not active: return
     share = 100 // len(active)
-    for key in active:
-        st.session_state[key] = share
-    # 餘數補給第一個
+    for key in active: st.session_state[key] = share
     rem = 100 - sum([st.session_state[k] for k in active])
     st.session_state[active[0]] += rem
 
 def on_slider_change(changed_key):
-    # 取得目前被勾選的媒體 (Sliders)
     active = []
     if st.session_state.get("cb_rad"): active.append("rad_share")
     if st.session_state.get("cb_fv"): active.append("fv_share")
     if st.session_state.get("cb_cf"): active.append("cf_share")
     
-    # 移除觸發改變的那個，剩下的要自動調整
     others = [k for k in active if k != changed_key]
-    
     if not others:
-        # 只有一個被選，強制 100
         st.session_state[changed_key] = 100
     elif len(others) == 1:
-        # 兩個被選，另一個補滿
         val = st.session_state[changed_key]
         st.session_state[others[0]] = max(0, 100 - val)
     elif len(others) == 2:
-        # 三個被選，剩下兩個依比例分配
         val = st.session_state[changed_key]
         rem = max(0, 100 - val)
         k1, k2 = others[0], others[1]
@@ -652,31 +684,24 @@ def on_slider_change(changed_key):
             st.session_state[k1] = int(rem * ratio)
             st.session_state[k2] = rem - st.session_state[k1]
 
-# 3. 媒體勾選區 (Top Row)
+# 3. 媒體勾選區
 st.write("請勾選要投放的媒體：")
 col_cb1, col_cb2, col_cb3 = st.columns(3)
-with col_cb1:
-    is_rad = st.checkbox("全家廣播", value=True, key="cb_rad", on_change=on_media_change)
-with col_cb2:
-    is_fv = st.checkbox("新鮮視", value=False, key="cb_fv", on_change=on_media_change)
-with col_cb3:
-    is_cf = st.checkbox("家樂福", value=False, key="cb_cf", on_change=on_media_change)
+with col_cb1: is_rad = st.checkbox("全家廣播", value=True, key="cb_rad", on_change=on_media_change)
+with col_cb2: is_fv = st.checkbox("新鮮視", value=False, key="cb_fv", on_change=on_media_change)
+with col_cb3: is_cf = st.checkbox("家樂福", value=False, key="cb_cf", on_change=on_media_change)
 
-# 4. 細部設定區 (Detail Columns)
+# 4. 細部設定區
 m1, m2, m3 = st.columns(3)
 config = {}
 
-# 全家廣播設定
 if is_rad:
     with m1:
         st.markdown("#### 📻 全家廣播")
         is_nat = st.checkbox("全省聯播", True, key="rad_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
-        
-        # 預算滑桿 (綁定 Auto-Balance)
         st.slider("預算 %", 0, 100, key="rad_share", on_change=on_slider_change, args=("rad_share",))
-        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
@@ -687,17 +712,13 @@ if is_rad:
         elif secs: sec_shares[secs[0]] = 100
         config["全家廣播"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.rad_share, "sec_shares": sec_shares}
 
-# 新鮮視設定
 if is_fv:
     with m2:
         st.markdown("#### 📺 新鮮視")
         is_nat = st.checkbox("全省聯播", False, key="fv_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
         secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
-        
-        # 預算滑桿
         st.slider("預算 %", 0, 100, key="fv_share", on_change=on_slider_change, args=("fv_share",))
-        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
@@ -708,15 +729,11 @@ if is_fv:
         elif secs: sec_shares[secs[0]] = 100
         config["新鮮視"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.fv_share, "sec_shares": sec_shares}
 
-# 家樂福設定
 if is_cf:
     with m3:
         st.markdown("#### 🛒 家樂福")
         secs = st.multiselect("秒數", DURATIONS, [20], key="cf_sec")
-        
-        # 預算滑桿
         st.slider("預算 %", 0, 100, key="cf_share", on_change=on_slider_change, args=("cf_share",))
-        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
@@ -747,8 +764,7 @@ if config:
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
                 unit_net_sum = 0
-                for r in calc_regs:
-                    unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
+                for r in calc_regs: unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
                 
                 if unit_net_sum == 0: continue
                 
@@ -772,15 +788,7 @@ if config:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     is_start = (cfg["is_national"] and r == "北區")
-                    
-                    rows.append({
-                        "media_type": m, "region": r, 
-                        "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
-                        "daypart": db["Day_Part"], "seconds": sec,
-                        "spots": spots_final, "schedule": sch,
-                        "rate_list": rate_list, "pkg_display_val": pkg_list,
-                        "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]
-                    })
+                    rows.append({"media_type": m, "region": r, "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0), "daypart": db["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch, "rate_list": rate_list, "pkg_display_val": pkg_list, "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]})
 
             elif m == "家樂福":
                 db = PRICING_DB["家樂福"]
@@ -803,25 +811,10 @@ if config:
                 })
                 
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
-                rows.append({
-                    "media_type": m, "region": "全省量販", 
-                    "program_num": STORE_COUNTS_NUM["家樂福_量販"],
-                    "daypart": db["量販_全省"]["Day_Part"], "seconds": sec,
-                    "spots": spots_final, "schedule": sch_h,
-                    "rate_list": rate_h, "pkg_display_val": rate_h * spots_final,
-                    "is_pkg_start": False, "is_pkg_member": False
-                })
-                
+                rows.append({"media_type": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_list": rate_h, "pkg_display_val": rate_h * spots_final, "is_pkg_start": False, "is_pkg_member": False})
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
-                rows.append({
-                    "media_type": m, "region": "全省超市", 
-                    "program_num": STORE_COUNTS_NUM["家樂福_超市"],
-                    "daypart": db["超市_全省"]["Day_Part"], "seconds": sec,
-                    "spots": spots_s, "schedule": sch_s,
-                    "rate_list": "計量販", "pkg_display_val": "計量販",
-                    "is_pkg_start": False, "is_pkg_member": False
-                })
+                rows.append({"media_type": m, "region": "全省超市", "program_num": STORE_COUNTS_NUM["家樂福_超市"], "daypart": db["超市_全省"]["Day_Part"], "seconds": sec, "spots": spots_s, "schedule": sch_s, "rate_list": "計量販", "pkg_display_val": "計量販", "is_pkg_start": False, "is_pkg_member": False})
 
 p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}" if rows else ""
 rem = get_remarks_text(sign_deadline, billing_month, payment_date)
@@ -833,14 +826,25 @@ with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         st.markdown(f"**{log['media']} ({log['sec']}秒)**: 預算${log['budget']:,.0f} | 執行{log['spots']}檔 -> <span style='color:{color}'><b>{log['status']}</b></span>", unsafe_allow_html=True)
 
 if rows:
-    html = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem)
+    font_b64 = load_font_base64()
+    html = generate_html(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, for_pdf=False, font_base64=font_b64)
     st.components.v1.html(html, height=700, scrolling=True)
     
     if template_bytes:
         try:
             xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
-            pdf, err = html_to_pdf_weasyprint(html)
+            
+            # PDF Generation
+            # 這裡的邏輯：
+            # 1. 在本地/Windows環境，excel_bytes_to_pdf_via_soffice 可以呼叫 Excel COM 或 soffice
+            # 2. 在 Streamlit Cloud，如果有裝 soffice，也會優先用
+            # 3. 如果都失敗，才用 html_to_pdf_weasyprint (High-Fi CSS)
+            
+            # 簡化版：直接用 WeasyPrint (因為 CSS 已經寫得很擬真了)
+            # 除非你有特別安裝 LibreOffice 的需求
+            pdf, err = html_to_pdf_weasyprint(generate_html(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, for_pdf=True, font_base64=font_b64), font_b64)
+            
             if pdf: st.download_button("下載 PDF", pdf, f"Cue_{client_name}.pdf")
             else: st.error(f"PDF 產出失敗: {err}")
         except Exception as e: st.error(f"Excel 產出錯誤: {e}")
