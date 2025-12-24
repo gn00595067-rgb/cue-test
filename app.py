@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.6 (Clean PDF)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v64.0 (Dynamic Rebuild)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -70,11 +70,8 @@ def load_default_template():
 # 2. GPT 核心引擎：Excel 轉 PDF (最擬真方案)
 # =========================================================
 def find_soffice_path():
-    """尋找 LibreOffice 執行檔"""
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice: return soffice
-    
-    # Windows 常見路徑
     if os.name == "nt":
         candidates = [
             r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -85,10 +82,7 @@ def find_soffice_path():
     return None
 
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
-    """
-    GPT 的強力邏輯：直接將 Excel 轉為 PDF，確保 100% 擬真。
-    """
-    # 1. Windows Local: 嘗試使用已安裝的 Excel
+    # 1. Windows Excel COM (最完美)
     if os.name == "nt":
         try:
             import win32com.client
@@ -103,7 +97,6 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                 wb = None
                 try:
                     wb = excel.Workbooks.Open(xlsx_path)
-                    # 0 = xlTypePDF
                     wb.ExportAsFixedFormat(0, pdf_path)
                 except: pass
                 finally:
@@ -115,9 +108,9 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
 
                 if os.path.exists(pdf_path):
                     with open(pdf_path, "rb") as f: return f.read(), "Excel App (Local)", ""
-        except: pass 
+        except: pass
 
-    # 2. LibreOffice (適用於 Streamlit Cloud 或有裝 LibreOffice 的電腦)
+    # 2. LibreOffice (Cloud 首選)
     soffice = find_soffice_path()
     if soffice:
         try:
@@ -125,13 +118,11 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                 xlsx_path = os.path.join(tmp, "cue.xlsx")
                 with open(xlsx_path, "wb") as f: f.write(xlsx_bytes)
 
-                # 執行轉檔指令
                 subprocess.run(
                     [soffice, "--headless", "--nologo", "--convert-to", "pdf", "--outdir", tmp, xlsx_path],
                     capture_output=True, timeout=60
                 )
                 
-                # 尋找產出的 PDF
                 pdf_path = os.path.join(tmp, "cue.pdf")
                 if not os.path.exists(pdf_path):
                     for fn in os.listdir(tmp):
@@ -144,16 +135,15 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
         except Exception as e:
             return None, "Fail", str(e)
 
-    return None, "Fail", "無可用的 Excel 轉檔引擎 (需安裝 LibreOffice)"
+    return None, "Fail", "無可用的 Excel 轉檔引擎"
 
 # =========================================================
-# 3. WeasyPrint Fallback
+# 3. WeasyPrint Fallback (備案 CSS)
 # =========================================================
 def html_to_pdf_fallback(html_str, font_b64):
     try: 
         from weasyprint import HTML, CSS
         from weasyprint.text.fonts import FontConfiguration
-        
         font_config = FontConfiguration()
         css_str = """
         @page { size: A4 landscape; margin: 0.5cm; }
@@ -168,7 +158,6 @@ def html_to_pdf_fallback(html_str, font_b64):
         """
         if font_b64:
             css_str = f"@font-face {{ font-family: 'NotoSansTC'; src: url(data:font/ttf;base64,{font_b64}) format('truetype'); }} " + css_str
-            
         pdf_bytes = HTML(string=html_str).write_pdf(stylesheets=[CSS(string=css_str)], font_config=font_config)
         return pdf_bytes, ""
     except Exception as e:
@@ -235,7 +224,7 @@ REGION_DISPLAY_6 = {
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
 
 # =========================================================
-# 5. Excel 生成模組
+# 5. Excel 生成模組 (重構：清空重繪)
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell): return cell
@@ -244,15 +233,15 @@ def _get_master_cell(ws, cell):
             return ws.cell(row=mr.min_row, column=mr.min_col)
     return None
 
-def safe_write_rc(ws, row, col, value):
-    cell = ws.cell(row=row, column=col)
+def safe_write(ws, addr, value):
+    cell = ws[addr]
     if isinstance(cell, MergedCell):
         master = _get_master_cell(ws, cell)
         if master: master.value = value
     else: cell.value = value
 
-def safe_write(ws, addr, value):
-    cell = ws[addr]
+def safe_write_rc(ws, row, col, value):
+    cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
         master = _get_master_cell(ws, cell)
         if master: master.value = value
@@ -353,14 +342,13 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     if meta["sheet_name"] not in wb.sheetnames: raise ValueError(f"缺少分頁：{meta['sheet_name']}")
     
-    # 🌟 關鍵修正：保留目標工作表，刪除其他所有分頁 (防止轉 PDF 時印出不相關的頁面)
+    # 1. 刪除無關分頁
     target_sheet = meta["sheet_name"]
     for s in list(wb.sheetnames):
-        if s != target_sheet:
-            del wb[s]
-            
+        if s != target_sheet: del wb[s]
     ws = wb[target_sheet]
 
+    # 2. 填寫 Header
     hc = meta["header_cells"]
     if "client" in hc: safe_write(ws, hc["client"], client_name)
     if "product" in hc: safe_write(ws, hc["product"], product_display_str)
@@ -368,102 +356,151 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     if "medium" in hc: safe_write(ws, hc["medium"], " ".join(sorted(set([r["media_type"] for r in rows]))))
     if "month" in hc: safe_write(ws, hc["month"], f" {start_dt.month}月")
     safe_write(ws, meta["date_start_cell"], datetime(start_dt.year, start_dt.month, start_dt.day))
+    for addr, text in meta.get("header_override", {}).items(): safe_write(ws, addr, text)
 
-    for addr, text in meta.get("header_override", {}).items():
-        safe_write(ws, addr, text)
-
+    # 3. 定位 Total 與 Anchors
     total_cell = find_cell_exact(ws, meta["total_label"])
     if not total_cell: raise ValueError("找不到 Total")
-    total_row = total_cell[0]
-
+    total_row_orig = total_cell[0]
     cols = meta["cols"]
+    
     sec_start = {}
     for m_key, kw in meta["anchors"].items():
         r0 = find_first_row_contains(ws, cols["station"], kw)
         if r0: sec_start[m_key] = r0
     
-    sec_order = sorted(sec_start.items(), key=lambda x: x[1])
-    sec_ranges = []
-    for i, (k, sr) in enumerate(sec_order):
-        next_start = sec_order[i + 1][1] if i + 1 < len(sec_order) else total_row
-        sec_ranges.append((k, sr, next_start - 1))
+    # 4. 關鍵邏輯：清空重繪 (由下往上處理，避免 index 跑掉)
+    sec_order = sorted(sec_start.items(), key=lambda x: x[1], reverse=True) # 倒序: 家樂福 -> 新鮮視 -> 廣播
+    
+    # 用來記錄每個區塊最後被寫入的位置 (為了最後計算 Total Row 真正的位置)
+    written_ranges = [] 
 
     reg_map = {r: i for i, r in enumerate(REGIONS_ORDER + ["全省量販", "全省超市"])}
     def sort_key(x): return (x["seconds"], reg_map.get(x["region"], 999))
-    grouped = {
+    grouped_data = {
         "全家廣播": sorted([r for r in rows if r["media_type"] == "全家廣播"], key=sort_key),
         "新鮮視": sorted([r for r in rows if r["media_type"] == "新鮮視"], key=sort_key),
         "家樂福": sorted([r for r in rows if r["media_type"] == "家樂福"], key=sort_key),
     }
 
-    for k, sr, er in sorted(sec_ranges, key=lambda x: x[1], reverse=True):
-        data = grouped.get(k, [])
-        needed = len(data)
-        if needed <= 0: continue
-        existing = er - sr + 1
-        if needed > existing:
-            ws.insert_rows(er + 1, amount=needed - existing)
-            for rr in range(er + 1, er + 1 + needed - existing):
-                copy_row_with_style_fix(ws, sr, rr, ws.max_column)
+    # 我們需要知道每個區塊的 "End Row" (下一個區塊的 Start - 1)
+    # 因為是倒序，所以第一個處理的(最下面) End Row 是 Total Row - 1
+    # 之後每個區塊的 End Row 就是上一個處理區塊的 Start Row - 1
+    
+    current_end_marker = total_row_orig - 1
+    
+    # 用來累積列數的變化量 (Insert 增加, Delete 減少)
+    row_offset_accum = 0 
 
-    total_row = find_cell_exact(ws, meta["total_label"])[0]
-    sec_start = {}
-    for m_key, kw in meta["anchors"].items():
-        r0 = find_first_row_contains(ws, cols["station"], kw)
-        if r0: sec_start[m_key] = r0
-    sec_order = sorted(sec_start.items(), key=lambda x: x[1])
-    sec_ranges = []
-    for i, (k, sr) in enumerate(sec_order):
-        next_start = sec_order[i + 1][1] if i + 1 < len(sec_order) else total_row
-        sec_ranges.append((k, sr, next_start - 1))
-
-    def station_title(m):
-        prefix = "全家便利商店\n" if m != "家樂福" else ""
-        name = "通路廣播廣告" if m == "全家廣播" else "新鮮視廣告" if m == "新鮮視" else "家樂福"
-        if format_type == "Shenghuo" and m == "全家廣播": name = "廣播通路廣告"
-        return prefix + name
-
-    written_rows = []
-    for m, sr, er in sec_ranges:
-        data = grouped.get(m, [])
-        if not data: continue
+    for i, (m_key, start_row_orig) in enumerate(sec_order):
+        # 找出這個區塊在 "原始模板" 中的結束列 (不含 Header)
+        # 注意：因為我們是倒序，所以 start_row_orig 是準的
+        # 但是我們需要找 "下一個 Anchor" 在哪裡
         
-        if meta["station_merge"]:
-            unmerge_col_overlap(ws, cols["station"], sr, er)
-            merge_rng = f"{cols['station']}{sr}:{cols['station']}{sr + len(data) - 1}"
+        # 重新掃描一次目前的 anchors (因為之前的 insert/delete 可能改變了位置? 不，我們還沒動)
+        # 為了安全，我們用原始 index 計算 range
+        
+        # 尋找下一個 anchor (在原始順序中)
+        # sec_order 是倒序，所以 sec_order[i-1] 是更下面的那個 (如果 i>0)
+        # 但我們需要 "更下面" 的 anchor row index
+        
+        # 簡單一點：直接找下一個非空行作為邊界？不穩。
+        # 策略：
+        # Range Start = start_row_orig (Header)
+        # Range End = current_end_marker
+        
+        # 1. 保留 Header + 1 (第一列資料作為樣式來源)
+        style_source_row = start_row_orig + 1
+        
+        # 2. 要刪除的範圍：從 style_source_row + 1 到 current_end_marker
+        # (如果只有一列資料，那就不用刪)
+        rows_to_delete = max(0, current_end_marker - style_source_row)
+        
+        # 3. 需要插入的列數
+        data = grouped_data.get(m_key, [])
+        needed = len(data)
+        
+        # 4. 計算動作
+        # 我們先刪除多餘的 (除了第一列)，然後插入不足的 (如果需要)
+        # 或者：全部刪掉只留第一列，然後插入 needed - 1
+        
+        if needed == 0:
+            # 如果沒有資料，甚至連第一列都要清空內容？
+            # 為了版面整潔，保留 Header 和第一空列 (清空內容) 比較好看
+            # 刪除多餘的
+            if rows_to_delete > 0:
+                ws.delete_rows(style_source_row + 1, amount=rows_to_delete)
+            
+            # 清空 style_source_row 的內容
+            for c in range(1, ws.max_column+1):
+                safe_write_rc(ws, style_source_row, c, None)
+            
+            # 更新下一個區塊的 end marker
+            current_end_marker = start_row_orig - 1
+            continue
+
+        # 如果有資料
+        # 先刪除舊的 (保留 style_source_row)
+        if rows_to_delete > 0:
+            ws.delete_rows(style_source_row + 1, amount=rows_to_delete)
+        
+        # 現在該區塊只剩 Header + 1 Row
+        # 需要插入 needed - 1 列
+        if needed > 1:
+            ws.insert_rows(style_source_row + 1, amount=needed - 1)
+            for r_idx in range(style_source_row + 1, style_source_row + 1 + needed - 1):
+                copy_row_with_style_fix(ws, style_source_row, r_idx, ws.max_column)
+        
+        # 寫入資料
+        curr_row = style_source_row
+        
+        # 處理 Station 合併
+        if meta["station_merge"] and needed > 0:
+            unmerge_col_overlap(ws, cols["station"], curr_row, curr_row + needed - 1)
+            merge_rng = f"{cols['station']}{curr_row}:{cols['station']}{curr_row + needed - 1}"
             ws.merge_cells(merge_rng)
-            top_cell = ws[f"{cols['station']}{sr}"]
-            top_cell.value = station_title(m)
+            top_cell = ws[f"{cols['station']}{curr_row}"]
+            top_cell.value = station_title(m_key)
             apply_center_style(top_cell)
 
-        row_ptr = sr
-        for r in data:
-            if not meta["station_merge"]: 
-                cell = ws[f"{cols['station']}{row_ptr}"]
-                cell.value = station_title(m)
+        for r_data in data:
+            if not meta["station_merge"]:
+                cell = ws[f"{cols['station']}{curr_row}"]
+                cell.value = station_title(m_key)
                 apply_center_style(cell)
-
-            safe_write(ws, f"{cols['location']}{row_ptr}", region_display(r["region"]))
-            prog_val = r.get("program_num", parse_count_to_int(r.get("program", 0)))
-            safe_write(ws, f"{cols['program']}{row_ptr}", int(prog_val))
+            
+            safe_write(ws, f"{cols['location']}{curr_row}", region_display(r_data["region"]))
+            prog_val = r_data.get("program_num", parse_count_to_int(r_data.get("program", 0)))
+            safe_write(ws, f"{cols['program']}{curr_row}", int(prog_val))
 
             if format_type == "Dongwu":
-                safe_write(ws, f"{cols['daypart']}{row_ptr}", r["daypart"])
-                if m == "家樂福": safe_write(ws, f"{cols['seconds']}{row_ptr}", f"{r['seconds']}秒")
-                else: safe_write(ws, f"{cols['seconds']}{row_ptr}", int(r["seconds"]))
-                safe_write(ws, f"{cols['rate']}{row_ptr}", r["rate_list"])
-                safe_write(ws, f"{cols['pkg']}{row_ptr}", r["pkg_display_val"])
+                safe_write(ws, f"{cols['daypart']}{curr_row}", r_data["daypart"])
+                if m_key == "家樂福": safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒")
+                else: safe_write(ws, f"{cols['seconds']}{curr_row}", int(r_data["seconds"]))
+                safe_write(ws, f"{cols['rate']}{curr_row}", r_data["rate_list"])
+                safe_write(ws, f"{cols['pkg']}{curr_row}", r_data["pkg_display_val"])
             else:
-                safe_write(ws, f"{cols['daypart']}{row_ptr}", r["daypart"])
-                safe_write(ws, f"{cols['seconds']}{row_ptr}", f"{r['seconds']}秒廣告")
-                safe_write(ws, f"{cols['proj_price']}{row_ptr}", r["pkg_display_val"] if isinstance(r["pkg_display_val"], int) else 0)
+                safe_write(ws, f"{cols['daypart']}{curr_row}", r_data["daypart"])
+                safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒廣告")
+                safe_write(ws, f"{cols['proj_price']}{curr_row}", r_data["pkg_display_val"] if isinstance(r_data["pkg_display_val"], int) else 0)
 
-            set_schedule(ws, row_ptr, meta["schedule_start_col"], meta["max_days"], r["schedule"])
-            spot_sum = sum(r["schedule"][:meta["max_days"]])
-            safe_write(ws, f"{meta['total_col']}{row_ptr}", spot_sum)
-            written_rows.append(row_ptr)
-            row_ptr += 1
+            set_schedule(ws, curr_row, meta["schedule_start_col"], meta["max_days"], r_data["schedule"])
+            spot_sum = sum(r_data["schedule"][:meta["max_days"]])
+            safe_write(ws, f"{meta['total_col']}{curr_row}", spot_sum)
+            
+            curr_row += 1
+            
+        written_ranges.append((curr_row - needed, curr_row - 1)) # 紀錄寫入範圍
+        
+        # 更新下一個迴圈的 end marker
+        current_end_marker = start_row_orig - 1
 
+    # 5. 重新尋找 Total Row (因為上面刪除/插入列，Total Row 的位置變了)
+    total_cell = find_cell_exact(ws, meta["total_label"])
+    if not total_cell: raise ValueError("找不到 Total")
+    total_row = total_cell[0]
+
+    # 6. 計算 Total
     eff_days = min((end_dt - start_dt).days + 1, meta["max_days"])
     daily_sums = [sum([x["schedule"][d] for x in rows if d < len(x["schedule"])]) for d in range(eff_days)]
     set_schedule(ws, total_row, meta["schedule_start_col"], meta["max_days"], daily_sums)
@@ -472,11 +509,8 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     pkg_col = cols.get("pkg") or cols.get("proj_price")
     safe_write(ws, f"{pkg_col}{total_row}", total_pkg)
 
+    # 7. Footer
     lbl = meta["footer_labels"]
-    def write_footer(key, val):
-        pos = find_cell_exact(ws, lbl.get(key, ""))
-        if pos: safe_write_rc(ws, pos[0], pos[1]+1, int(val))
-
     make_fee = 10000 
     pos_make = find_cell_exact(ws, lbl["make"])
     if pos_make:
@@ -485,17 +519,20 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         else: safe_write_rc(ws, pos_make[0], pos_make[1]+1, make_fee)
     
     vat = int(round((total_pkg + make_fee) * 0.05))
-    write_footer("vat", vat)
-    write_footer("grand", total_pkg + make_fee + vat)
+    
+    pos_vat = find_cell_exact(ws, lbl["vat"])
+    if pos_vat: safe_write_rc(ws, pos_vat[0], pos_vat[1]+1, vat)
+    
+    pos_grand = find_cell_exact(ws, lbl["grand"])
+    if pos_grand: safe_write_rc(ws, pos_grand[0], pos_grand[1]+1, total_pkg + make_fee + vat)
 
     rem_pos = find_cell_exact(ws, "Remarks：")
     if rem_pos:
         for i, rm in enumerate(remarks_list):
             safe_write_rc(ws, rem_pos[0] + 1 + i, rem_pos[1], rm)
 
-    if format_type == "Dongwu" and written_rows:
-        min_r, max_r = min(written_rows), total_row
-        force_center_columns_range(ws, meta["force_center_cols"], min_r, max_r)
+    if format_type == "Dongwu":
+        force_center_columns_range(ws, meta["force_center_cols"], min(r[0] for r in written_ranges) if written_ranges else total_row, total_row)
 
     out = io.BytesIO()
     wb.save(out)
@@ -523,7 +560,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
     eff_days = min(days_cnt, 31)
     
-    # CSS Injection for Preview
     st.markdown(f"""<style>
     .bg-dw-head {{ background-color: #4472C4; color: white; font-weight: bold; }}
     .bg-sh-head {{ background-color: #BDD7EE; color: black; font-weight: bold; }}
@@ -599,7 +635,7 @@ def build_colgroup(format_type, days):
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.6: Clean PDF)")
+st.title("📺 媒體 Cue 表生成器 (v64.0)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -819,6 +855,7 @@ with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         st.markdown(f"**{log['media']} ({log['sec']}秒)**: 預算${log['budget']:,.0f} | 執行{log['spots']}檔 -> <span style='color:{color}'><b>{log['status']}</b></span>", unsafe_allow_html=True)
 
 if rows:
+    font_b64 = load_font_base64()
     html = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem)
     st.components.v1.html(html, height=700, scrolling=True)
     
@@ -827,16 +864,13 @@ if rows:
             xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
             
-            # PDF Generation Strategy
-            # Priority 1: Direct Excel/LibreOffice Conversion (Most accurate)
-            # Priority 2: WeasyPrint (Fallback)
+            # PDF Generation
             pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx)
             
             if pdf_bytes:
                 st.download_button(f"下載 PDF ({method})", pdf_bytes, f"Cue_{client_name}.pdf")
             else:
-                st.warning(f"Excel 轉 PDF 失敗 ({err})，切換至備用渲染引擎 (HTML)...")
-                font_b64 = load_font_base64()
+                st.warning(f"Excel 轉 PDF 失敗 ({method}: {err})，切換至備用渲染引擎 (HTML)...")
                 pdf_bytes, err = html_to_pdf_fallback(html, font_b64)
                 if pdf_bytes: st.download_button("下載 PDF (Fallback)", pdf_bytes, f"Cue_{client_name}.pdf")
                 else: st.error(f"PDF 產出失敗: {err}")
