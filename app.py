@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.5 (GPT Engine Restored)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.6 (Clean PDF)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -87,8 +87,6 @@ def find_soffice_path():
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     """
     GPT 的強力邏輯：直接將 Excel 轉為 PDF，確保 100% 擬真。
-    策略 1: Windows Excel COM (最完美)
-    策略 2: LibreOffice (Linux/Cloud 首選)
     """
     # 1. Windows Local: 嘗試使用已安裝的 Excel
     if os.name == "nt":
@@ -117,7 +115,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
 
                 if os.path.exists(pdf_path):
                     with open(pdf_path, "rb") as f: return f.read(), "Excel App (Local)", ""
-        except: pass # 如果沒裝 Excel 或 pywin32，就跳過
+        except: pass 
 
     # 2. LibreOffice (適用於 Streamlit Cloud 或有裝 LibreOffice 的電腦)
     soffice = find_soffice_path()
@@ -133,7 +131,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                     capture_output=True, timeout=60
                 )
                 
-                # 尋找產出的 PDF (有時候檔名會變)
+                # 尋找產出的 PDF
                 pdf_path = os.path.join(tmp, "cue.pdf")
                 if not os.path.exists(pdf_path):
                     for fn in os.listdir(tmp):
@@ -149,10 +147,9 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     return None, "Fail", "無可用的 Excel 轉檔引擎 (需安裝 LibreOffice)"
 
 # =========================================================
-# 3. WeasyPrint Fallback (備案)
+# 3. WeasyPrint Fallback
 # =========================================================
 def html_to_pdf_fallback(html_str, font_b64):
-    """如果上面那招失敗，才用這招硬畫"""
     try: 
         from weasyprint import HTML, CSS
         from weasyprint.text.fonts import FontConfiguration
@@ -326,10 +323,6 @@ def find_first_row_contains(ws, col_letter, keyword):
         if isinstance(v, str) and keyword in v: return r
     return None
 
-def hide_unused_sheets(wb, keep_sheet_names, mode="veryHidden"):
-    for sh in wb.worksheets:
-        if sh.title not in keep_sheet_names: sh.sheet_state = mode
-
 SHEET_META = {
     "Dongwu": {
         "sheet_name": "東吳-格式", "date_start_cell": "I7", "schedule_start_col": "I",
@@ -359,8 +352,14 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     meta = SHEET_META[format_type]
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     if meta["sheet_name"] not in wb.sheetnames: raise ValueError(f"缺少分頁：{meta['sheet_name']}")
-    ws = wb[meta["sheet_name"]]
-    hide_unused_sheets(wb, [meta["sheet_name"]])
+    
+    # 🌟 關鍵修正：保留目標工作表，刪除其他所有分頁 (防止轉 PDF 時印出不相關的頁面)
+    target_sheet = meta["sheet_name"]
+    for s in list(wb.sheetnames):
+        if s != target_sheet:
+            del wb[s]
+            
+    ws = wb[target_sheet]
 
     hc = meta["header_cells"]
     if "client" in hc: safe_write(ws, hc["client"], client_name)
@@ -548,7 +547,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         cols_def = ["Station", "Location", "Program", "Day-part", "Size", "rate<br>(List)", "Package<br>(List)"]
     else:
         cols_def = ["頻道", "播出地區", "播出店數", "播出時間", "秒數<br>規格", "專案價"]
-    th_fixed = "".join([f"<th class='{header_cls}' rowspan='2'>{c}</th>" for c in cols_def])
+    th_fixed = "".join([f"<th rowspan='2'>{c}</th>" for c in cols_def])
     
     rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media_type"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
     tbody = ""
@@ -589,10 +588,18 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 
     return f"""<div class="excel-container"><div style="margin-bottom:10px;"><b>客戶：</b>{c_name} &nbsp; <b>產品：</b>{p_display}<br><span style="color:#666;">走期：{start_dt} ~ {end_dt}</span></div><table class="excel-table"><thead><tr>{th_fixed}{date_th1}<th class='{header_cls}' rowspan='2'>檔次</th></tr><tr>{date_th2}</tr></thead><tbody>{tbody}{tfoot}</tbody></table><div class="remarks"><b>Remarks：</b><br>{"<br>".join(remarks)}</div></div>"""
 
+def build_colgroup(format_type, days):
+    cols = ["col_station", "col_loc", "col_prog", "col_daypart", "col_size", "col_rate", "col_pkg"] if format_type=="Dongwu" else ["col_station", "col_loc", "col_prog", "col_daypart", "col_size", "col_pkg"]
+    html = "<colgroup>"
+    for c in cols: html += f"<col class='{c}'>"
+    for _ in range(days): html += "<col class='col_day'>"
+    html += "<col class='col_total'></colgroup>"
+    return html
+
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.5: GPT Engine Restored)")
+st.title("📺 媒體 Cue 表生成器 (v63.6: Clean PDF)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -750,8 +757,7 @@ if config:
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
                 unit_net_sum = 0
-                for r in calc_regs:
-                    unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
+                for r in calc_regs: unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
                 
                 if unit_net_sum == 0: continue
                 
@@ -775,15 +781,7 @@ if config:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     is_start = (cfg["is_national"] and r == "北區")
-                    
-                    rows.append({
-                        "media_type": m, "region": r, 
-                        "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
-                        "daypart": db["Day_Part"], "seconds": sec,
-                        "spots": spots_final, "schedule": sch,
-                        "rate_list": rate_list, "pkg_display_val": pkg_list,
-                        "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]
-                    })
+                    rows.append({"media_type": m, "region": r, "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0), "daypart": db["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch, "rate_list": rate_list, "pkg_display_val": pkg_list, "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]})
 
             elif m == "家樂福":
                 db = PRICING_DB["家樂福"]
@@ -806,25 +804,10 @@ if config:
                 })
                 
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
-                rows.append({
-                    "media_type": m, "region": "全省量販", 
-                    "program_num": STORE_COUNTS_NUM["家樂福_量販"],
-                    "daypart": db["量販_全省"]["Day_Part"], "seconds": sec,
-                    "spots": spots_final, "schedule": sch_h,
-                    "rate_list": rate_h, "pkg_display_val": rate_h * spots_final,
-                    "is_pkg_start": False, "is_pkg_member": False
-                })
-                
+                rows.append({"media_type": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_list": rate_h, "pkg_display_val": rate_h * spots_final, "is_pkg_start": False, "is_pkg_member": False})
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
-                rows.append({
-                    "media_type": m, "region": "全省超市", 
-                    "program_num": STORE_COUNTS_NUM["家樂福_超市"],
-                    "daypart": db["超市_全省"]["Day_Part"], "seconds": sec,
-                    "spots": spots_s, "schedule": sch_s,
-                    "rate_list": "計量販", "pkg_display_val": "計量販",
-                    "is_pkg_start": False, "is_pkg_member": False
-                })
+                rows.append({"media_type": m, "region": "全省超市", "program_num": STORE_COUNTS_NUM["家樂福_超市"], "daypart": db["超市_全省"]["Day_Part"], "seconds": sec, "spots": spots_s, "schedule": sch_s, "rate_list": "計量販", "pkg_display_val": "計量販", "is_pkg_start": False, "is_pkg_member": False})
 
 p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}" if rows else ""
 rem = get_remarks_text(sign_deadline, billing_month, payment_date)
@@ -844,19 +827,19 @@ if rows:
             xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
             
-            # PDF Generation (Priority: 1. Excel/LibreOffice, 2. WeasyPrint)
+            # PDF Generation Strategy
+            # Priority 1: Direct Excel/LibreOffice Conversion (Most accurate)
+            # Priority 2: WeasyPrint (Fallback)
             pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx)
             
             if pdf_bytes:
                 st.download_button(f"下載 PDF ({method})", pdf_bytes, f"Cue_{client_name}.pdf")
             else:
-                st.warning(f"Excel 轉 PDF 失敗 ({method}: {err})，嘗試使用備案 HTML 渲染...")
+                st.warning(f"Excel 轉 PDF 失敗 ({err})，切換至備用渲染引擎 (HTML)...")
                 font_b64 = load_font_base64()
                 pdf_bytes, err = html_to_pdf_fallback(html, font_b64)
-                if pdf_bytes:
-                    st.download_button("下載 PDF (Fallback)", pdf_bytes, f"Cue_{client_name}.pdf")
-                else:
-                    st.error(f"PDF 產出完全失敗: {err}")
-                    
-        except Exception as e: st.error(f"產出錯誤: {e}")
+                if pdf_bytes: st.download_button("下載 PDF (Fallback)", pdf_bytes, f"Cue_{client_name}.pdf")
+                else: st.error(f"PDF 產出失敗: {err}")
+                
+        except Exception as e: st.error(f"Excel 產出錯誤: {e}")
     else: st.warning("請上傳模板以啟用下載。")
