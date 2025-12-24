@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v64.0 (Dynamic Rebuild)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v64.1 (Fix NameError)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -70,8 +70,11 @@ def load_default_template():
 # 2. GPT 核心引擎：Excel 轉 PDF (最擬真方案)
 # =========================================================
 def find_soffice_path():
+    """尋找 LibreOffice 執行檔"""
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice: return soffice
+    
+    # Windows 常見路徑
     if os.name == "nt":
         candidates = [
             r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -369,10 +372,8 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         r0 = find_first_row_contains(ws, cols["station"], kw)
         if r0: sec_start[m_key] = r0
     
-    # 4. 關鍵邏輯：清空重繪 (由下往上處理，避免 index 跑掉)
-    sec_order = sorted(sec_start.items(), key=lambda x: x[1], reverse=True) # 倒序: 家樂福 -> 新鮮視 -> 廣播
-    
-    # 用來記錄每個區塊最後被寫入的位置 (為了最後計算 Total Row 真正的位置)
+    # 4. 關鍵邏輯：清空重繪
+    sec_order = sorted(sec_start.items(), key=lambda x: x[1], reverse=True)
     written_ranges = [] 
 
     reg_map = {r: i for i, r in enumerate(REGIONS_ORDER + ["全省量販", "全省超市"])}
@@ -382,79 +383,36 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         "新鮮視": sorted([r for r in rows if r["media_type"] == "新鮮視"], key=sort_key),
         "家樂福": sorted([r for r in rows if r["media_type"] == "家樂福"], key=sort_key),
     }
-
-    # 我們需要知道每個區塊的 "End Row" (下一個區塊的 Start - 1)
-    # 因為是倒序，所以第一個處理的(最下面) End Row 是 Total Row - 1
-    # 之後每個區塊的 End Row 就是上一個處理區塊的 Start Row - 1
     
     current_end_marker = total_row_orig - 1
     
-    # 用來累積列數的變化量 (Insert 增加, Delete 減少)
-    row_offset_accum = 0 
+    def station_title(m):
+        prefix = "全家便利商店\n" if m != "家樂福" else ""
+        name = "通路廣播廣告" if m == "全家廣播" else "新鮮視廣告" if m == "新鮮視" else "家樂福"
+        if format_type == "Shenghuo" and m == "全家廣播": name = "廣播通路廣告"
+        return prefix + name
 
     for i, (m_key, start_row_orig) in enumerate(sec_order):
-        # 找出這個區塊在 "原始模板" 中的結束列 (不含 Header)
-        # 注意：因為我們是倒序，所以 start_row_orig 是準的
-        # 但是我們需要找 "下一個 Anchor" 在哪裡
-        
-        # 重新掃描一次目前的 anchors (因為之前的 insert/delete 可能改變了位置? 不，我們還沒動)
-        # 為了安全，我們用原始 index 計算 range
-        
-        # 尋找下一個 anchor (在原始順序中)
-        # sec_order 是倒序，所以 sec_order[i-1] 是更下面的那個 (如果 i>0)
-        # 但我們需要 "更下面" 的 anchor row index
-        
-        # 簡單一點：直接找下一個非空行作為邊界？不穩。
-        # 策略：
-        # Range Start = start_row_orig (Header)
-        # Range End = current_end_marker
-        
-        # 1. 保留 Header + 1 (第一列資料作為樣式來源)
         style_source_row = start_row_orig + 1
-        
-        # 2. 要刪除的範圍：從 style_source_row + 1 到 current_end_marker
-        # (如果只有一列資料，那就不用刪)
         rows_to_delete = max(0, current_end_marker - style_source_row)
         
-        # 3. 需要插入的列數
         data = grouped_data.get(m_key, [])
         needed = len(data)
         
-        # 4. 計算動作
-        # 我們先刪除多餘的 (除了第一列)，然後插入不足的 (如果需要)
-        # 或者：全部刪掉只留第一列，然後插入 needed - 1
-        
         if needed == 0:
-            # 如果沒有資料，甚至連第一列都要清空內容？
-            # 為了版面整潔，保留 Header 和第一空列 (清空內容) 比較好看
-            # 刪除多餘的
-            if rows_to_delete > 0:
-                ws.delete_rows(style_source_row + 1, amount=rows_to_delete)
-            
-            # 清空 style_source_row 的內容
-            for c in range(1, ws.max_column+1):
-                safe_write_rc(ws, style_source_row, c, None)
-            
-            # 更新下一個區塊的 end marker
+            if rows_to_delete > 0: ws.delete_rows(style_source_row + 1, amount=rows_to_delete)
+            for c in range(1, ws.max_column+1): safe_write_rc(ws, style_source_row, c, None)
             current_end_marker = start_row_orig - 1
             continue
 
-        # 如果有資料
-        # 先刪除舊的 (保留 style_source_row)
-        if rows_to_delete > 0:
-            ws.delete_rows(style_source_row + 1, amount=rows_to_delete)
-        
-        # 現在該區塊只剩 Header + 1 Row
-        # 需要插入 needed - 1 列
+        if rows_to_delete > 0: ws.delete_rows(style_source_row + 1, amount=rows_to_delete)
         if needed > 1:
             ws.insert_rows(style_source_row + 1, amount=needed - 1)
             for r_idx in range(style_source_row + 1, style_source_row + 1 + needed - 1):
                 copy_row_with_style_fix(ws, style_source_row, r_idx, ws.max_column)
         
-        # 寫入資料
         curr_row = style_source_row
         
-        # 處理 Station 合併
         if meta["station_merge"] and needed > 0:
             unmerge_col_overlap(ws, cols["station"], curr_row, curr_row + needed - 1)
             merge_rng = f"{cols['station']}{curr_row}:{cols['station']}{curr_row + needed - 1}"
@@ -490,12 +448,10 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
             
             curr_row += 1
             
-        written_ranges.append((curr_row - needed, curr_row - 1)) # 紀錄寫入範圍
-        
-        # 更新下一個迴圈的 end marker
+        written_ranges.append((curr_row - needed, curr_row - 1))
         current_end_marker = start_row_orig - 1
 
-    # 5. 重新尋找 Total Row (因為上面刪除/插入列，Total Row 的位置變了)
+    # 5. 重新尋找 Total Row
     total_cell = find_cell_exact(ws, meta["total_label"])
     if not total_cell: raise ValueError("找不到 Total")
     total_row = total_cell[0]
@@ -635,7 +591,7 @@ def build_colgroup(format_type, days):
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v64.0)")
+st.title("📺 媒體 Cue 表生成器 (v64.1: Fix NameError)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
