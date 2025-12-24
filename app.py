@@ -14,16 +14,17 @@ import openpyxl
 from openpyxl.utils import column_index_from_string
 from openpyxl.cell.cell import MergedCell
 from openpyxl.formula.translate import Translator
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 
 # =========================================================
-# 0. 基礎工具
+# 0. 基礎工具函式 (必須放在最前面)
 # =========================================================
 def parse_count_to_int(x):
     """將含有逗號的字串或數字轉為整數"""
     if x is None: return 0
     if isinstance(x, (int, float)): return int(x)
     s = str(x)
+    # 移除非數字字符 (保留數字)
     m = re.findall(r"[\d,]+", s)
     if not m: return 0
     return int(m[0].replace(",", ""))
@@ -36,9 +37,9 @@ def html_escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 # =========================================================
-# 1. 頁面設定
+# 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.1 (Auto-Balance)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.2 (Fix Carrefour Bug)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -52,7 +53,7 @@ def load_default_template():
             r = requests.get(url, timeout=20, allow_redirects=True)
             if r.status_code == 200:
                 if b"<!DOCTYPE html>" in r.content[:500]:
-                    status_msg.append("⚠️ Drive 下載權限受限")
+                    status_msg.append("⚠️ Drive 下載權限受限 (可能需登入)")
                 else:
                     return r.content, "雲端硬碟 (Google Drive)", status_msg
         except Exception as e:
@@ -67,7 +68,7 @@ def load_default_template():
     return None, None, status_msg
 
 # =========================================================
-# 2. CSS 樣式
+# 2. CSS 樣式 (仿 Excel)
 # =========================================================
 st.markdown("""
 <style>
@@ -555,7 +556,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.1: Auto-Balance)")
+st.title("📺 媒體 Cue 表生成器 (v63.2: Auto-Balance)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -596,64 +597,46 @@ config = {}
 # ==========================================
 # 🔥 自動預算平衡邏輯 (Auto-Balance) 🔥
 # ==========================================
-# 1. 偵測哪些媒體被勾選
 active_media = []
 if "rad_check" not in st.session_state: st.session_state.rad_check = True
 if "fv_check" not in st.session_state: st.session_state.fv_check = False
 if "cf_check" not in st.session_state: st.session_state.cf_check = False
 
-# 為了讓 checkbox 觸發 rerun，需要 unique key
-if st.checkbox("全家廣播", value=st.session_state.rad_check, key="rad_cb"):
-    active_media.append("rad")
-if st.checkbox("新鮮視", value=st.session_state.fv_check, key="fv_cb"):
-    active_media.append("fv")
-if st.checkbox("家樂福", value=st.session_state.cf_check, key="cf_cb"):
-    active_media.append("cf")
+if st.checkbox("全家廣播", value=st.session_state.rad_check, key="rad_cb"): active_media.append("rad")
+if st.checkbox("新鮮視", value=st.session_state.fv_check, key="fv_cb"): active_media.append("fv")
+if st.checkbox("家樂福", value=st.session_state.cf_check, key="cf_cb"): active_media.append("cf")
 
-# 2. 初始化 slider 數值 (如果 session 中沒有)
 if "rad_share" not in st.session_state: st.session_state.rad_share = 100
 if "fv_share" not in st.session_state: st.session_state.fv_share = 0
 if "cf_share" not in st.session_state: st.session_state.cf_share = 0
 
-# 3. 定義平衡函式 (Callback)
 def balance_shares(changed_key):
     total = 100
     current_val = st.session_state[changed_key]
     others = [m for m in active_media if f"{m}_share" != changed_key]
     
-    if not others: # 只有一個媒體被選，強制 100
-        st.session_state[changed_key] = 100
-    elif len(others) == 1: # 兩個媒體，另一個自動補滿
-        other_key = f"{others[0]}_share"
-        st.session_state[other_key] = max(0, total - current_val)
-    elif len(others) == 2: # 三個媒體，剩下的依比例分配
+    if not others: st.session_state[changed_key] = 100
+    elif len(others) == 1: st.session_state[f"{others[0]}_share"] = max(0, total - current_val)
+    elif len(others) == 2:
         rem = max(0, total - current_val)
         k1, k2 = f"{others[0]}_share", f"{others[1]}_share"
         sum_others = st.session_state[k1] + st.session_state[k2]
-        if sum_others == 0:
-            st.session_state[k1] = rem // 2
-            st.session_state[k2] = rem - st.session_state[k1]
+        if sum_others == 0: st.session_state[k1] = rem // 2; st.session_state[k2] = rem - st.session_state[k1]
         else:
             ratio = st.session_state[k1] / sum_others
             st.session_state[k1] = int(rem * ratio)
             st.session_state[k2] = rem - st.session_state[k1]
 
-# 4. 顯示 Sliders (綁定 Callback)
 with m1:
     if "rad" in active_media:
         is_nat = st.checkbox("全省聯播", True, key="rad_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
-        
-        # Slider
         st.slider("預算 %", 0, 100, key="rad_share", on_change=balance_shares, args=("rad_share",))
-        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
-            for s in sorted(secs)[:-1]:
-                v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"rs_{s}")
-                sec_shares[s] = v; ls -= v
+            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"rs_{s}"); sec_shares[s] = v; ls -= v
             sec_shares[sorted(secs)[-1]] = ls
         elif secs: sec_shares[secs[0]] = 100
         config["全家廣播"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.rad_share, "sec_shares": sec_shares}
@@ -663,16 +646,11 @@ with m2:
         is_nat = st.checkbox("全省聯播", False, key="fv_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
         secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
-        
-        # Slider
         st.slider("預算 %", 0, 100, key="fv_share", on_change=balance_shares, args=("fv_share",))
-        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
-            for s in sorted(secs)[:-1]:
-                v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"fs_{s}")
-                sec_shares[s] = v; ls -= v
+            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"fs_{s}"); sec_shares[s] = v; ls -= v
             sec_shares[sorted(secs)[-1]] = ls
         elif secs: sec_shares[secs[0]] = 100
         config["新鮮視"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.fv_share, "sec_shares": sec_shares}
@@ -680,30 +658,22 @@ with m2:
 with m3:
     if "cf" in active_media:
         secs = st.multiselect("秒數", DURATIONS, [20], key="cf_sec")
-        
-        # Slider
         st.slider("預算 %", 0, 100, key="cf_share", on_change=balance_shares, args=("cf_share",))
-        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
-            for s in sorted(secs)[:-1]:
-                v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"cs_{s}")
-                sec_shares[s] = v; ls -= v
+            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"cs_{s}"); sec_shares[s] = v; ls -= v
             sec_shares[sorted(secs)[-1]] = ls
         elif secs: sec_shares[secs[0]] = 100
         config["家樂福"] = {"regions": ["全省"], "seconds": sorted(secs), "share": st.session_state.cf_share, "sec_shares": sec_shares}
 
-# 5. 強制檢查：如果只有一個媒體被選，但 Slider 被拉到非 100，強制校正
 if len(active_media) == 1:
     only_key = f"{active_media[0]}_share"
-    if st.session_state[only_key] != 100:
-        st.session_state[only_key] = 100
-        st.rerun()
+    if st.session_state[only_key] != 100: st.session_state[only_key] = 100; st.rerun()
 
-# ---------------------------------------------------------
-# 計算引擎 (維持不變)
-# ---------------------------------------------------------
+rows = []
+debug_logs = []
+
 if config:
     for m, cfg in config.items():
         m_budget = total_budget_input * (cfg["share"] / 100.0)
@@ -739,6 +709,7 @@ if config:
                 spots_final = math.ceil(s_budget / (unit_net * penalty))
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
+                # [FIX] 修正 db["Std_Spots"] 為 base_std
                 debug_logs.append({"media": m, "sec": sec, "budget": s_budget, "unit_cost": unit_net * penalty, "spots": spots_final, "std": base_std, "status": "未達標" if penalty > 1 else "達標", "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"})
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
                 rows.append({"media_type": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_list": rate_h, "pkg_display_val": rate_h * spots_final, "is_pkg_start": False, "is_pkg_member": False})
