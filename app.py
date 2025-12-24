@@ -17,14 +17,12 @@ from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 
 # =========================================================
-# 0. 基礎工具函式 (必須放在最前面)
+# 0. 基礎工具
 # =========================================================
 def parse_count_to_int(x):
-    """將含有逗號的字串或數字轉為整數"""
     if x is None: return 0
     if isinstance(x, (int, float)): return int(x)
     s = str(x)
-    # 移除非數字字符 (保留數字)
     m = re.findall(r"[\d,]+", s)
     if not m: return 0
     return int(m[0].replace(",", ""))
@@ -39,7 +37,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.2 (Fix Carrefour Bug)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.3 (UI Refined)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -53,7 +51,7 @@ def load_default_template():
             r = requests.get(url, timeout=20, allow_redirects=True)
             if r.status_code == 200:
                 if b"<!DOCTYPE html>" in r.content[:500]:
-                    status_msg.append("⚠️ Drive 下載權限受限 (可能需登入)")
+                    status_msg.append("⚠️ Drive 下載權限受限")
                 else:
                     return r.content, "雲端硬碟 (Google Drive)", status_msg
         except Exception as e:
@@ -68,7 +66,7 @@ def load_default_template():
     return None, None, status_msg
 
 # =========================================================
-# 2. CSS 樣式 (仿 Excel)
+# 2. CSS 樣式
 # =========================================================
 st.markdown("""
 <style>
@@ -556,7 +554,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.2: Auto-Balance)")
+st.title("📺 媒體 Cue 表生成器 (v63.3: UI Refined)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -571,18 +569,17 @@ else:
 st.markdown("### 1. 選擇格式")
 format_type = st.radio("", ["Dongwu", "Shenghuo"], horizontal=True, label_visibility="collapsed")
 
-with st.container():
-    st.markdown("### 2. 基本資料設定")
-    with st.expander("📝 點擊展開/收合基本資料", expanded=True):
-        c1, c2, c3 = st.columns(3)
-        with c1: client_name = st.text_input("客戶名稱", "萬國通路")
-        with c2: product_name = st.text_input("產品名稱", "統一布丁")
-        with c3: total_budget_input = st.number_input("總預算 (未稅 Net)", value=1000000, step=10000)
-        c4, c5 = st.columns(2)
-        with c4: start_date = st.date_input("開始日", datetime(2026, 1, 1))
-        with c5: end_date = st.date_input("結束日", datetime(2026, 1, 31))
-        days_count = (end_date - start_date).days + 1
-        st.info(f"📅 走期共 **{days_count}** 天")
+st.markdown("### 2. 基本資料設定")
+c1, c2, c3 = st.columns(3)
+with c1: client_name = st.text_input("客戶名稱", "萬國通路")
+with c2: product_name = st.text_input("產品名稱", "統一布丁")
+with c3: total_budget_input = st.number_input("總預算 (未稅 Net)", value=1000000, step=10000)
+
+c4, c5 = st.columns(2)
+with c4: start_date = st.date_input("開始日", datetime(2026, 1, 1))
+with c5: end_date = st.date_input("結束日", datetime(2026, 1, 31))
+days_count = (end_date - start_date).days + 1
+st.info(f"📅 走期共 **{days_count}** 天")
 
 with st.expander("📝 備註欄位設定 (Remarks)", expanded=False):
     rc1, rc2, rc3 = st.columns(3)
@@ -591,86 +588,148 @@ with st.expander("📝 備註欄位設定 (Remarks)", expanded=False):
     payment_date = rc3.date_input("付款兌現日", datetime(2026, 3, 31))
 
 st.markdown("### 3. 媒體投放設定")
-m1, m2, m3 = st.columns(3)
-config = {}
 
-# ==========================================
-# 🔥 自動預算平衡邏輯 (Auto-Balance) 🔥
-# ==========================================
-active_media = []
-if "rad_check" not in st.session_state: st.session_state.rad_check = True
-if "fv_check" not in st.session_state: st.session_state.fv_check = False
-if "cf_check" not in st.session_state: st.session_state.cf_check = False
+# ---------------------------------------------------------
+# 🔥 重構後的媒體選擇 UI (Checkboxes 在上方，Details 在下方)
+# ---------------------------------------------------------
 
-if st.checkbox("全家廣播", value=st.session_state.rad_check, key="rad_cb"): active_media.append("rad")
-if st.checkbox("新鮮視", value=st.session_state.fv_check, key="fv_cb"): active_media.append("fv")
-if st.checkbox("家樂福", value=st.session_state.cf_check, key="cf_cb"): active_media.append("cf")
-
+# 1. 狀態初始化
 if "rad_share" not in st.session_state: st.session_state.rad_share = 100
 if "fv_share" not in st.session_state: st.session_state.fv_share = 0
 if "cf_share" not in st.session_state: st.session_state.cf_share = 0
 
-def balance_shares(changed_key):
-    total = 100
-    current_val = st.session_state[changed_key]
-    others = [m for m in active_media if f"{m}_share" != changed_key]
+# 2. 自動平衡邏輯 (Callback)
+def on_media_change():
+    # 這裡只處理「當勾選狀態改變時」的平衡邏輯
+    # (實際上因為 checkbox 是直接綁定 session state，
+    #  我們可以在 rerun 後直接檢查哪些被勾選，然後調整 slider 值)
     
-    if not others: st.session_state[changed_key] = 100
-    elif len(others) == 1: st.session_state[f"{others[0]}_share"] = max(0, total - current_val)
+    # 取得目前被勾選的媒體
+    active = []
+    if st.session_state.get("cb_rad"): active.append("rad_share")
+    if st.session_state.get("cb_fv"): active.append("fv_share")
+    if st.session_state.get("cb_cf"): active.append("cf_share")
+    
+    if not active: return # 都沒選
+    
+    # 重新分配 (簡單平均，或者保留原值但 normalize)
+    # 這裡採用「平均分配」策略，讓使用者知道狀態重置了，體驗比較明確
+    share = 100 // len(active)
+    for key in active:
+        st.session_state[key] = share
+    # 餘數補給第一個
+    rem = 100 - sum([st.session_state[k] for k in active])
+    st.session_state[active[0]] += rem
+
+def on_slider_change(changed_key):
+    # 取得目前被勾選的媒體 (Sliders)
+    active = []
+    if st.session_state.get("cb_rad"): active.append("rad_share")
+    if st.session_state.get("cb_fv"): active.append("fv_share")
+    if st.session_state.get("cb_cf"): active.append("cf_share")
+    
+    # 移除觸發改變的那個，剩下的要自動調整
+    others = [k for k in active if k != changed_key]
+    
+    if not others:
+        # 只有一個被選，強制 100
+        st.session_state[changed_key] = 100
+    elif len(others) == 1:
+        # 兩個被選，另一個補滿
+        val = st.session_state[changed_key]
+        st.session_state[others[0]] = max(0, 100 - val)
     elif len(others) == 2:
-        rem = max(0, total - current_val)
-        k1, k2 = f"{others[0]}_share", f"{others[1]}_share"
+        # 三個被選，剩下兩個依比例分配
+        val = st.session_state[changed_key]
+        rem = max(0, 100 - val)
+        k1, k2 = others[0], others[1]
         sum_others = st.session_state[k1] + st.session_state[k2]
-        if sum_others == 0: st.session_state[k1] = rem // 2; st.session_state[k2] = rem - st.session_state[k1]
+        if sum_others == 0:
+            st.session_state[k1] = rem // 2
+            st.session_state[k2] = rem - st.session_state[k1]
         else:
             ratio = st.session_state[k1] / sum_others
             st.session_state[k1] = int(rem * ratio)
             st.session_state[k2] = rem - st.session_state[k1]
 
-with m1:
-    if "rad" in active_media:
+# 3. 媒體勾選區 (Top Row)
+st.write("請勾選要投放的媒體：")
+col_cb1, col_cb2, col_cb3 = st.columns(3)
+with col_cb1:
+    is_rad = st.checkbox("全家廣播", value=True, key="cb_rad", on_change=on_media_change)
+with col_cb2:
+    is_fv = st.checkbox("新鮮視", value=False, key="cb_fv", on_change=on_media_change)
+with col_cb3:
+    is_cf = st.checkbox("家樂福", value=False, key="cb_cf", on_change=on_media_change)
+
+# 4. 細部設定區 (Detail Columns)
+m1, m2, m3 = st.columns(3)
+config = {}
+
+# 全家廣播設定
+if is_rad:
+    with m1:
+        st.markdown("#### 📻 全家廣播")
         is_nat = st.checkbox("全省聯播", True, key="rad_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
-        st.slider("預算 %", 0, 100, key="rad_share", on_change=balance_shares, args=("rad_share",))
+        
+        # 預算滑桿 (綁定 Auto-Balance)
+        st.slider("預算 %", 0, 100, key="rad_share", on_change=on_slider_change, args=("rad_share",))
+        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
-            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"rs_{s}"); sec_shares[s] = v; ls -= v
+            for s in sorted(secs)[:-1]:
+                v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"rs_{s}")
+                sec_shares[s] = v; ls -= v
             sec_shares[sorted(secs)[-1]] = ls
         elif secs: sec_shares[secs[0]] = 100
         config["全家廣播"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.rad_share, "sec_shares": sec_shares}
 
-with m2:
-    if "fv" in active_media:
+# 新鮮視設定
+if is_fv:
+    with m2:
+        st.markdown("#### 📺 新鮮視")
         is_nat = st.checkbox("全省聯播", False, key="fv_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
         secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
-        st.slider("預算 %", 0, 100, key="fv_share", on_change=balance_shares, args=("fv_share",))
+        
+        # 預算滑桿
+        st.slider("預算 %", 0, 100, key="fv_share", on_change=on_slider_change, args=("fv_share",))
+        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
-            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"fs_{s}"); sec_shares[s] = v; ls -= v
+            for s in sorted(secs)[:-1]:
+                v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"fs_{s}")
+                sec_shares[s] = v; ls -= v
             sec_shares[sorted(secs)[-1]] = ls
         elif secs: sec_shares[secs[0]] = 100
         config["新鮮視"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.fv_share, "sec_shares": sec_shares}
 
-with m3:
-    if "cf" in active_media:
+# 家樂福設定
+if is_cf:
+    with m3:
+        st.markdown("#### 🛒 家樂福")
         secs = st.multiselect("秒數", DURATIONS, [20], key="cf_sec")
-        st.slider("預算 %", 0, 100, key="cf_share", on_change=balance_shares, args=("cf_share",))
+        
+        # 預算滑桿
+        st.slider("預算 %", 0, 100, key="cf_share", on_change=on_slider_change, args=("cf_share",))
+        
         sec_shares = {}
         if len(secs) > 1:
             ls = 100
-            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"cs_{s}"); sec_shares[s] = v; ls -= v
+            for s in sorted(secs)[:-1]:
+                v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"cs_{s}")
+                sec_shares[s] = v; ls -= v
             sec_shares[sorted(secs)[-1]] = ls
         elif secs: sec_shares[secs[0]] = 100
         config["家樂福"] = {"regions": ["全省"], "seconds": sorted(secs), "share": st.session_state.cf_share, "sec_shares": sec_shares}
 
-if len(active_media) == 1:
-    only_key = f"{active_media[0]}_share"
-    if st.session_state[only_key] != 100: st.session_state[only_key] = 100; st.rerun()
-
+# ---------------------------------------------------------
+# 計算引擎
+# ---------------------------------------------------------
 rows = []
 debug_logs = []
 
@@ -681,41 +740,88 @@ if config:
             s_budget = m_budget * (sec_pct / 100.0)
             if s_budget <= 0: continue
             factor = get_sec_factor(m, sec)
+            
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
                 calc_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
+                
                 unit_net_sum = 0
-                for r in calc_regs: unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
+                for r in calc_regs:
+                    unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
+                
                 if unit_net_sum == 0: continue
+                
                 spots_init = math.ceil(s_budget / unit_net_sum)
                 penalty = 1.1 if spots_init < db["Std_Spots"] else 1.0
                 spots_final = math.ceil(s_budget / (unit_net_sum * penalty))
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
+                
                 sch = calculate_schedule(spots_final, days_count)
-                debug_logs.append({"media": m, "sec": sec, "budget": s_budget, "unit_cost": unit_net_sum * penalty, "spots": spots_final, "std": db["Std_Spots"], "status": "未達標" if penalty > 1 else "達標", "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"})
+                
+                debug_logs.append({
+                    "media": m, "sec": sec, "budget": s_budget, 
+                    "unit_cost": unit_net_sum * penalty, "spots": spots_final, 
+                    "std": db["Std_Spots"], "factor": factor, 
+                    "status": "未達標" if penalty > 1 else "達標",
+                    "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"
+                })
+                
                 for r in display_regs:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     is_start = (cfg["is_national"] and r == "北區")
-                    rows.append({"media_type": m, "region": r, "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0), "daypart": db["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch, "rate_list": rate_list, "pkg_display_val": pkg_list, "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]})
+                    
+                    rows.append({
+                        "media_type": m, "region": r, 
+                        "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
+                        "daypart": db["Day_Part"], "seconds": sec,
+                        "spots": spots_final, "schedule": sch,
+                        "rate_list": rate_list, "pkg_display_val": pkg_list,
+                        "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]
+                    })
+
             elif m == "家樂福":
                 db = PRICING_DB["家樂福"]
                 base_std = db["量販_全省"]["Std_Spots"]
                 unit_net = (db["量販_全省"]["Net"] / base_std) * factor
+                
                 spots_init = math.ceil(s_budget / unit_net)
                 penalty = 1.1 if spots_init < base_std else 1.0
                 spots_final = math.ceil(s_budget / (unit_net * penalty))
                 if spots_final % 2 != 0: spots_final += 1
+                
                 sch_h = calculate_schedule(spots_final, days_count)
-                # [FIX] 修正 db["Std_Spots"] 為 base_std
-                debug_logs.append({"media": m, "sec": sec, "budget": s_budget, "unit_cost": unit_net * penalty, "spots": spots_final, "std": base_std, "status": "未達標" if penalty > 1 else "達標", "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"})
+                
+                debug_logs.append({
+                    "media": m, "sec": sec, "budget": s_budget, 
+                    "unit_cost": unit_net * penalty, "spots": spots_final, 
+                    "std": base_std, "factor": factor,
+                    "status": "未達標" if penalty > 1 else "達標",
+                    "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"
+                })
+                
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
-                rows.append({"media_type": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_list": rate_h, "pkg_display_val": rate_h * spots_final, "is_pkg_start": False, "is_pkg_member": False})
+                rows.append({
+                    "media_type": m, "region": "全省量販", 
+                    "program_num": STORE_COUNTS_NUM["家樂福_量販"],
+                    "daypart": db["量販_全省"]["Day_Part"], "seconds": sec,
+                    "spots": spots_final, "schedule": sch_h,
+                    "rate_list": rate_h, "pkg_display_val": rate_h * spots_final,
+                    "is_pkg_start": False, "is_pkg_member": False
+                })
+                
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
-                rows.append({"media_type": m, "region": "全省超市", "program_num": STORE_COUNTS_NUM["家樂福_超市"], "daypart": db["超市_全省"]["Day_Part"], "seconds": sec, "spots": spots_s, "schedule": sch_s, "rate_list": "計量販", "pkg_display_val": "計量販", "is_pkg_start": False, "is_pkg_member": False})
+                rows.append({
+                    "media_type": m, "region": "全省超市", 
+                    "program_num": STORE_COUNTS_NUM["家樂福_超市"],
+                    "daypart": db["超市_全省"]["Day_Part"], "seconds": sec,
+                    "spots": spots_s, "schedule": sch_s,
+                    "rate_list": "計量販", "pkg_display_val": "計量販",
+                    "is_pkg_start": False, "is_pkg_member": False
+                })
 
 p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}" if rows else ""
 rem = get_remarks_text(sign_deadline, billing_month, payment_date)
