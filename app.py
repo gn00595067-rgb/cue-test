@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.4 (Final Merge)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v63.5 (GPT Engine Restored)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -67,105 +67,118 @@ def load_default_template():
     return None, None, status_msg
 
 # =========================================================
-# 2. 高擬真 CSS 生成器 (這是讓 PDF 像 Excel 的關鍵)
+# 2. GPT 核心引擎：Excel 轉 PDF (最擬真方案)
 # =========================================================
-def build_preview_css(format_type: str, for_pdf: bool, font_base64: str | None):
-    # PDF 用 pt (點) 單位，Preview 用 px
-    if for_pdf:
-        unit = "pt"
-        border = "0.5pt"
-        pad = "2pt"
-        fs = "8pt"          # 字體縮小以塞入 A4
-        head_fs = "8pt"
-        row_h = "14pt"
-        # 定義跟 Excel 差不多的欄寬比例
-        fixed_w_station = "90pt"
-        fixed_w_loc = "75pt"
-        fixed_w_prog = "50pt"
-        fixed_w_daypart = "65pt"
-        fixed_w_size = "35pt"
-        fixed_w_rate = "60pt"
-        fixed_w_pkg = "70pt"
-        fixed_w_total = "40pt"
-        day_w = "14pt"
-        page_margin = "0.5cm"
-    else:
-        unit = "px"
-        border = "1px"
-        pad = "4px"
-        fs = "12px"
-        head_fs = "12px"
-        row_h = "24px"
-        fixed_w_station = "140px"
-        fixed_w_loc = "120px"
-        fixed_w_prog = "72px"
-        fixed_w_daypart = "96px"
-        fixed_w_size = "52px"
-        fixed_w_rate = "92px"
-        fixed_w_pkg = "110px"
-        fixed_w_total = "60px"
-        day_w = "22px"
-        page_margin = "10px"
-
-    head_bg = "#4472C4" if format_type == "Dongwu" else "#BDD7EE"
-    head_fg = "#FFFFFF" if format_type == "Dongwu" else "#000000"
-    weekend_bg = "#FFD966"
-    total_bg = "#FFF2CC"
-
-    font_face = ""
-    font_family = "NotoSansTC, Arial, sans-serif"
-    if font_base64 and for_pdf:
-        font_face = f"""
-        @font-face {{
-            font-family: 'NotoSansTC';
-            src: url(data:font/ttf;base64,{font_base64}) format('truetype');
-        }}
-        """
-        font_family = "'NotoSansTC', sans-serif"
-
-    # PDF 關鍵：@page landscape
-    page_css = f"@page {{ size: A4 landscape; margin: {page_margin}; }}" if for_pdf else ""
+def find_soffice_path():
+    """尋找 LibreOffice 執行檔"""
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice: return soffice
     
-    # 凍結窗格 (只在網頁版)
-    sticky = "" if for_pdf else "position: sticky; top: 0; z-index: 10;"
+    # Windows 常見路徑
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ]
+        for p in candidates:
+            if os.path.exists(p): return p
+    return None
 
-    return f"""
-    {font_face}
-    {page_css}
-    body {{ margin: 0; font-family: {font_family}; font-size: {fs}; color: #000; }}
-    .wrap {{ background: #fff; padding: {('0' if for_pdf else '10px')}; }}
-    table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
-    th, td {{ 
-        border: {border} solid #555; 
-        padding: {pad}; 
-        height: {row_h}; 
-        vertical-align: middle; 
-        text-align: center; 
-        white-space: nowrap; 
-        overflow: hidden; 
-    }}
-    thead th {{ {sticky} background: {head_bg}; color: {head_fg}; font-weight: 700; font-size: {head_fs}; }}
-    .wknd {{ background: {weekend_bg} !important; color: #000 !important; }}
-    .total {{ background: {total_bg}; font-weight: 700; }}
-    .left {{ text-align: left !important; padding-left: 4px !important; }}
-    .right {{ text-align: right !important; padding-right: 4px !important; font-family: Consolas, monospace; }}
-    .remarks {{ margin-top: 10px; font-size: {fs}; line-height: 1.4; text-align: left; }}
-    .meta {{ margin-bottom: 10px; font-size: {head_fs}; text-align: left; }}
-    
-    /* 欄寬控制 */
-    .col_station {{ width: {fixed_w_station}; }}
-    .col_loc     {{ width: {fixed_w_loc}; }}
-    .col_prog    {{ width: {fixed_w_prog}; }}
-    .col_daypart {{ width: {fixed_w_daypart}; }}
-    .col_size    {{ width: {fixed_w_size}; }}
-    .col_rate    {{ width: {fixed_w_rate}; }}
-    .col_pkg     {{ width: {fixed_w_pkg}; }}
-    .col_day     {{ width: {day_w}; }}
-    .col_total   {{ width: {fixed_w_total}; }}
+def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     """
+    GPT 的強力邏輯：直接將 Excel 轉為 PDF，確保 100% 擬真。
+    策略 1: Windows Excel COM (最完美)
+    策略 2: LibreOffice (Linux/Cloud 首選)
+    """
+    # 1. Windows Local: 嘗試使用已安裝的 Excel
+    if os.name == "nt":
+        try:
+            import win32com.client
+            with tempfile.TemporaryDirectory() as tmp:
+                xlsx_path = os.path.join(tmp, "cue.xlsx")
+                pdf_path = os.path.join(tmp, "cue.pdf")
+                with open(xlsx_path, "wb") as f: f.write(xlsx_bytes)
+
+                excel = win32com.client.DispatchEx("Excel.Application")
+                excel.Visible = False
+                excel.DisplayAlerts = False
+                wb = None
+                try:
+                    wb = excel.Workbooks.Open(xlsx_path)
+                    # 0 = xlTypePDF
+                    wb.ExportAsFixedFormat(0, pdf_path)
+                except: pass
+                finally:
+                    if wb: 
+                        try: wb.Close(False)
+                        except: pass
+                    try: excel.Quit()
+                    except: pass
+
+                if os.path.exists(pdf_path):
+                    with open(pdf_path, "rb") as f: return f.read(), "Excel App (Local)", ""
+        except: pass # 如果沒裝 Excel 或 pywin32，就跳過
+
+    # 2. LibreOffice (適用於 Streamlit Cloud 或有裝 LibreOffice 的電腦)
+    soffice = find_soffice_path()
+    if soffice:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                xlsx_path = os.path.join(tmp, "cue.xlsx")
+                with open(xlsx_path, "wb") as f: f.write(xlsx_bytes)
+
+                # 執行轉檔指令
+                subprocess.run(
+                    [soffice, "--headless", "--nologo", "--convert-to", "pdf", "--outdir", tmp, xlsx_path],
+                    capture_output=True, timeout=60
+                )
+                
+                # 尋找產出的 PDF (有時候檔名會變)
+                pdf_path = os.path.join(tmp, "cue.pdf")
+                if not os.path.exists(pdf_path):
+                    for fn in os.listdir(tmp):
+                        if fn.endswith(".pdf"): pdf_path = os.path.join(tmp, fn); break
+                
+                if os.path.exists(pdf_path):
+                    with open(pdf_path, "rb") as f: return f.read(), "LibreOffice", ""
+                
+                return None, "Fail", "LibreOffice 轉檔無輸出"
+        except Exception as e:
+            return None, "Fail", str(e)
+
+    return None, "Fail", "無可用的 Excel 轉檔引擎 (需安裝 LibreOffice)"
 
 # =========================================================
-# 3. 資料庫
+# 3. WeasyPrint Fallback (備案)
+# =========================================================
+def html_to_pdf_fallback(html_str, font_b64):
+    """如果上面那招失敗，才用這招硬畫"""
+    try: 
+        from weasyprint import HTML, CSS
+        from weasyprint.text.fonts import FontConfiguration
+        
+        font_config = FontConfiguration()
+        css_str = """
+        @page { size: A4 landscape; margin: 0.5cm; }
+        body { font-family: 'NotoSansTC', sans-serif !important; font-size: 8pt; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 0.5pt solid #555; padding: 2px; text-align: center; white-space: nowrap; }
+        .bg-dw-head { background-color: #4472C4; color: white; }
+        .bg-sh-head { background-color: #BDD7EE; color: black; }
+        .bg-weekend { background-color: #FFD966; }
+        .bg-total   { background-color: #FFF2CC; }
+        tr { page-break-inside: avoid; }
+        """
+        if font_b64:
+            css_str = f"@font-face {{ font-family: 'NotoSansTC'; src: url(data:font/ttf;base64,{font_b64}) format('truetype'); }} " + css_str
+            
+        pdf_bytes = HTML(string=html_str).write_pdf(stylesheets=[CSS(string=css_str)], font_config=font_config)
+        return pdf_bytes, ""
+    except Exception as e:
+        return None, str(e)
+
+# =========================================================
+# 4. 資料庫
 # =========================================================
 STORE_COUNTS_RAW = {
     "全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", "雲嘉南": "499店", "高屏": "490店", "東區": "181店",
@@ -225,7 +238,7 @@ REGION_DISPLAY_6 = {
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
 
 # =========================================================
-# 4. Excel 生成模組
+# 5. Excel 生成模組
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell): return cell
@@ -490,32 +503,12 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 5. HTML to PDF via WeasyPrint (with High-Fi CSS)
-# =========================================================
-def html_to_pdf_weasyprint(html_str, font_b64):
-    try: 
-        from weasyprint import HTML, CSS
-        from weasyprint.text.fonts import FontConfiguration
-    except ImportError: return None, "WeasyPrint not installed"
-    
-    font_config = FontConfiguration()
-    # 關鍵：這裡把高擬真 CSS (build_preview_css) 再注入一次給 PDF
-    css_pdf = build_preview_css("Dongwu", for_pdf=True, font_base64=font_b64)
-    
-    try:
-        pdf_bytes = HTML(string=html_str).write_pdf(stylesheets=[CSS(string=css_pdf)], font_config=font_config)
-        return pdf_bytes, ""
-    except Exception as e:
-        return None, f"PDF Render Error: {str(e)}"
-
-# =========================================================
-# 6. HTML 生成器 (含 CSS)
+# 6. HTML Preview
 # =========================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
     if os.path.exists(font_path):
-        with open(font_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
+        with open(font_path, "rb") as f: return base64.b64encode(f.read()).decode("utf-8")
     
     url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTF/TraditionalChinese/NotoSansTC-Regular.ttf"
     try:
@@ -526,17 +519,27 @@ def load_font_base64():
     except: pass
     return None
 
-def generate_html(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, for_pdf, font_base64):
-    css = build_preview_css(format_type, for_pdf, font_base64)
-    
+def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks):
+    header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
+    media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
     eff_days = min(days_cnt, 31)
+    
+    # CSS Injection for Preview
+    st.markdown(f"""<style>
+    .bg-dw-head {{ background-color: #4472C4; color: white; font-weight: bold; }}
+    .bg-sh-head {{ background-color: #BDD7EE; color: black; font-weight: bold; }}
+    .bg-weekend {{ background-color: #FFD966; color: black; }}
+    .bg-total   {{ background-color: #FFF2CC; font-weight: bold; }}
+    .col_day {{ min-width: 25px; }}
+    </style>""", unsafe_allow_html=True)
+
     date_th1, date_th2 = "", ""
     curr = start_dt
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
-    
     for i in range(eff_days):
         wd = curr.weekday()
-        bg = "wknd" if (format_type == "Dongwu" and wd >= 5) else ""
+        bg = "bg-weekend" if (format_type == "Dongwu" and wd >= 5) else header_cls
+        if format_type == "Shenghuo": bg = header_cls 
         date_th1 += f"<th class='{bg} col_day'>{curr.day}</th>"
         date_th2 += f"<th class='{bg} col_day'>{weekdays[wd]}</th>"
         curr += timedelta(days=1)
@@ -545,12 +548,9 @@ def generate_html(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_ty
         cols_def = ["Station", "Location", "Program", "Day-part", "Size", "rate<br>(List)", "Package<br>(List)"]
     else:
         cols_def = ["頻道", "播出地區", "播出店數", "播出時間", "秒數<br>規格", "專案價"]
+    th_fixed = "".join([f"<th class='{header_cls}' rowspan='2'>{c}</th>" for c in cols_def])
     
-    th_fixed = "".join([f"<th rowspan='2'>{c}</th>" for c in cols_def])
-    
-    media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
     rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media_type"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
-    
     tbody = ""
     media_counts = {}
     for r in rows_sorted: media_counts[r["media_type"]] = media_counts.get(r["media_type"], 0) + 1
@@ -559,54 +559,40 @@ def generate_html(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_ty
     for r in rows_sorted:
         m = r["media_type"]
         tbody += "<tr>"
-        
-        display_name = "全家便利商店<br>通路廣播廣告" if m=="全家廣播" else "全家便利商店<br>新鮮視廣告" if m=="新鮮視" else "家樂福"
-        if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
+        if not media_printed[m]:
+            rowspan = media_counts[m]
+            display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
+            if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
+            if format_type == "Shenghuo": tbody += f"<td class='left'>{display_name}</td>"
+            else: tbody += f"<td class='left' rowspan='{rowspan}'>{display_name}</td>"; media_printed[m] = True
+        elif format_type == "Shenghuo":
+             display_name = "全家便利商店<br>廣播通路廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
+             tbody += f"<td class='left'>{display_name}</td>"
 
-        if format_type == "Shenghuo":
-            tbody += f"<td class='left'>{display_name}</td>"
-        else:
-            if not media_printed[m]:
-                tbody += f"<td class='left' rowspan='{media_counts[m]}'>{display_name}</td>"
-                media_printed[m] = True
-        
         tbody += f"<td>{region_display(r['region'])}</td><td class='right'>{r.get('program_num','')}</td><td>{r['daypart']}</td>"
         sec_txt = f"{r['seconds']}秒" if format_type=="Dongwu" and m=="家樂福" else f"{r['seconds']}" if format_type=="Dongwu" else f"{r['seconds']}秒廣告"
         tbody += f"<td>{sec_txt}</td>"
-        
         rate = f"{r['rate_list']:,}" if isinstance(r['rate_list'], int) else r['rate_list']
         pkg = f"{r['pkg_display_val']:,}" if isinstance(r['pkg_display_val'], int) else r['pkg_display_val']
-        
         if format_type == "Dongwu": tbody += f"<td class='right'>{rate}</td><td class='right'>{pkg}</td>"
         else: tbody += f"<td class='right'>{pkg}</td>"
         
         for d in r['schedule'][:eff_days]: tbody += f"<td>{d}</td>"
-        tbody += f"<td class='total'>{sum(r['schedule'])}</td></tr>"
+        tbody += f"<td class='bg-total'>{sum(r['schedule'])}</td></tr>"
 
     totals = [sum([r["schedule"][d] for r in rows if d < len(r["schedule"])]) for d in range(eff_days)]
     total_pkg = sum([r["pkg_display_val"] for r in rows if isinstance(r["pkg_display_val"], int)])
-    colspan = 5
-    empty_td = "<td></td>" if format_type == "Dongwu" else ""
-    tfoot = f"<tr class='total'><td colspan='{colspan}' class='left'>Total</td>{empty_td}<td class='right'>{total_pkg:,}</td>"
+    colspan = 5; empty_td = "<td></td>" if format_type == "Dongwu" else ""
+    tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='left'>Total</td>{empty_td}<td class='right'>{total_pkg:,}</td>"
     for t in totals: tfoot += f"<td>{t}</td>"
     tfoot += f"<td>{sum(totals)}</td></tr>"
 
-    remarks_html = "<div class='remarks'><b>Remarks：</b><br>" + "<br>".join(remarks) + "</div>"
-    
-    return f"""<html><head><meta charset='utf-8'><style>{css}</style></head><body><div class='wrap'><div class='meta'><b>客戶：</b>{c_name} &nbsp; <b>產品：</b>{p_display}<br><span style='color:#666'>走期：{start_dt} ~ {end_dt}</span></div><table>{build_colgroup(format_type, eff_days)}<thead><tr>{th_fixed}{date_th1}<th rowspan='2'>檔次</th></tr><tr>{date_th2}</tr></thead><tbody>{tbody}{tfoot}</tbody></table>{remarks_html}</div></body></html>"""
-
-def build_colgroup(format_type, days):
-    cols = ["col_station", "col_loc", "col_prog", "col_daypart", "col_size", "col_rate", "col_pkg"] if format_type=="Dongwu" else ["col_station", "col_loc", "col_prog", "col_daypart", "col_size", "col_pkg"]
-    html = "<colgroup>"
-    for c in cols: html += f"<col class='{c}'>"
-    for _ in range(days): html += "<col class='col_day'>"
-    html += "<col class='col_total'></colgroup>"
-    return html
+    return f"""<div class="excel-container"><div style="margin-bottom:10px;"><b>客戶：</b>{c_name} &nbsp; <b>產品：</b>{p_display}<br><span style="color:#666;">走期：{start_dt} ~ {end_dt}</span></div><table class="excel-table"><thead><tr>{th_fixed}{date_th1}<th class='{header_cls}' rowspan='2'>檔次</th></tr><tr>{date_th2}</tr></thead><tbody>{tbody}{tfoot}</tbody></table><div class="remarks"><b>Remarks：</b><br>{"<br>".join(remarks)}</div></div>"""
 
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v63.4)")
+st.title("📺 媒體 Cue 表生成器 (v63.5: GPT Engine Restored)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -764,7 +750,8 @@ if config:
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
                 unit_net_sum = 0
-                for r in calc_regs: unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
+                for r in calc_regs:
+                    unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
                 
                 if unit_net_sum == 0: continue
                 
@@ -788,7 +775,15 @@ if config:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     is_start = (cfg["is_national"] and r == "北區")
-                    rows.append({"media_type": m, "region": r, "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0), "daypart": db["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch, "rate_list": rate_list, "pkg_display_val": pkg_list, "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]})
+                    
+                    rows.append({
+                        "media_type": m, "region": r, 
+                        "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
+                        "daypart": db["Day_Part"], "seconds": sec,
+                        "spots": spots_final, "schedule": sch,
+                        "rate_list": rate_list, "pkg_display_val": pkg_list,
+                        "is_pkg_start": is_start, "is_pkg_member": cfg["is_national"]
+                    })
 
             elif m == "家樂福":
                 db = PRICING_DB["家樂福"]
@@ -811,10 +806,25 @@ if config:
                 })
                 
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
-                rows.append({"media_type": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_list": rate_h, "pkg_display_val": rate_h * spots_final, "is_pkg_start": False, "is_pkg_member": False})
+                rows.append({
+                    "media_type": m, "region": "全省量販", 
+                    "program_num": STORE_COUNTS_NUM["家樂福_量販"],
+                    "daypart": db["量販_全省"]["Day_Part"], "seconds": sec,
+                    "spots": spots_final, "schedule": sch_h,
+                    "rate_list": rate_h, "pkg_display_val": rate_h * spots_final,
+                    "is_pkg_start": False, "is_pkg_member": False
+                })
+                
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
-                rows.append({"media_type": m, "region": "全省超市", "program_num": STORE_COUNTS_NUM["家樂福_超市"], "daypart": db["超市_全省"]["Day_Part"], "seconds": sec, "spots": spots_s, "schedule": sch_s, "rate_list": "計量販", "pkg_display_val": "計量販", "is_pkg_start": False, "is_pkg_member": False})
+                rows.append({
+                    "media_type": m, "region": "全省超市", 
+                    "program_num": STORE_COUNTS_NUM["家樂福_超市"],
+                    "daypart": db["超市_全省"]["Day_Part"], "seconds": sec,
+                    "spots": spots_s, "schedule": sch_s,
+                    "rate_list": "計量販", "pkg_display_val": "計量販",
+                    "is_pkg_start": False, "is_pkg_member": False
+                })
 
 p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}" if rows else ""
 rem = get_remarks_text(sign_deadline, billing_month, payment_date)
@@ -826,8 +836,7 @@ with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         st.markdown(f"**{log['media']} ({log['sec']}秒)**: 預算${log['budget']:,.0f} | 執行{log['spots']}檔 -> <span style='color:{color}'><b>{log['status']}</b></span>", unsafe_allow_html=True)
 
 if rows:
-    font_b64 = load_font_base64()
-    html = generate_html(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, for_pdf=False, font_base64=font_b64)
+    html = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem)
     st.components.v1.html(html, height=700, scrolling=True)
     
     if template_bytes:
@@ -835,17 +844,19 @@ if rows:
             xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
             
-            # PDF Generation
-            # 這裡的邏輯：
-            # 1. 在本地/Windows環境，excel_bytes_to_pdf_via_soffice 可以呼叫 Excel COM 或 soffice
-            # 2. 在 Streamlit Cloud，如果有裝 soffice，也會優先用
-            # 3. 如果都失敗，才用 html_to_pdf_weasyprint (High-Fi CSS)
+            # PDF Generation (Priority: 1. Excel/LibreOffice, 2. WeasyPrint)
+            pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx)
             
-            # 簡化版：直接用 WeasyPrint (因為 CSS 已經寫得很擬真了)
-            # 除非你有特別安裝 LibreOffice 的需求
-            pdf, err = html_to_pdf_weasyprint(generate_html(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, for_pdf=True, font_base64=font_b64), font_b64)
-            
-            if pdf: st.download_button("下載 PDF", pdf, f"Cue_{client_name}.pdf")
-            else: st.error(f"PDF 產出失敗: {err}")
-        except Exception as e: st.error(f"Excel 產出錯誤: {e}")
+            if pdf_bytes:
+                st.download_button(f"下載 PDF ({method})", pdf_bytes, f"Cue_{client_name}.pdf")
+            else:
+                st.warning(f"Excel 轉 PDF 失敗 ({method}: {err})，嘗試使用備案 HTML 渲染...")
+                font_b64 = load_font_base64()
+                pdf_bytes, err = html_to_pdf_fallback(html, font_b64)
+                if pdf_bytes:
+                    st.download_button("下載 PDF (Fallback)", pdf_bytes, f"Cue_{client_name}.pdf")
+                else:
+                    st.error(f"PDF 產出完全失敗: {err}")
+                    
+        except Exception as e: st.error(f"產出錯誤: {e}")
     else: st.warning("請上傳模板以啟用下載。")
