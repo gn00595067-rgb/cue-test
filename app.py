@@ -1,3 +1,21 @@
+# -*- coding: utf-8 -*-
+"""
+Cue Sheet Pro v66.0 (Spec-aligned Value Anchor + Block Renderer + Footer Polish)
+
+你現在遇到的錯誤：
+    ModuleNotFoundError: No module named 'streamlit'
+
+請先安裝套件（Windows / cmd）：
+    py -m pip install --upgrade pip
+    py -m pip install streamlit openpyxl requests weasyprint
+
+（選用，若你要用 Excel COM 轉 PDF）
+    py -m pip install pywin32
+
+執行：
+    streamlit run freshvision_closer.py
+"""
+
 import streamlit as st
 import math
 import io
@@ -12,7 +30,7 @@ from copy import copy
 
 import requests
 import openpyxl
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils import column_index_from_string
 from openpyxl.cell.cell import MergedCell
 from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Font
@@ -40,18 +58,17 @@ def html_escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 def norm_ws(s: str) -> str:
-    """把多重空白壓成單一空白，避免 LibreOffice/PDF 轉檔時空白跑版"""
     if s is None:
         return ""
     return re.sub(r"\s+", " ", str(s)).strip()
 
-def ceil_div(a, b):
-    return int(math.ceil(a / b)) if b else 0
+def ceil_int(x: float) -> int:
+    return int(math.ceil(x)) if x is not None else 0
 
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.0 (Value Anchor + True Layout)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.0 (Spec-aligned Value Anchor)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -81,7 +98,7 @@ def load_default_template():
     return None, None, status_msg
 
 # =========================================================
-# 2. Excel 轉 PDF (Local 方案)
+# 2. Excel 轉 PDF (最擬真方案)
 # =========================================================
 def find_soffice_path():
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
@@ -102,7 +119,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     # 1) Windows Excel COM
     if os.name == "nt":
         try:
-            import win32com.client  # pywin32
+            import win32com.client  # type: ignore
             with tempfile.TemporaryDirectory() as tmp:
                 xlsx_path = os.path.join(tmp, "cue.xlsx")
                 pdf_path = os.path.join(tmp, "cue.pdf")
@@ -144,7 +161,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
 
                 subprocess.run(
                     [soffice, "--headless", "--nologo", "--convert-to", "pdf", "--outdir", tmp, xlsx_path],
-                    capture_output=True, timeout=90
+                    capture_output=True, timeout=60
                 )
 
                 pdf_path = os.path.join(tmp, "cue.pdf")
@@ -165,7 +182,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     return None, "Fail", "無可用的 Excel 轉檔引擎"
 
 # =========================================================
-# 3. WeasyPrint Fallback (雲端擬真)
+# 3. WeasyPrint Fallback (備案)
 # =========================================================
 def html_to_pdf_fallback(html_str, font_b64):
     try:
@@ -176,14 +193,12 @@ def html_to_pdf_fallback(html_str, font_b64):
         @page { size: A4 landscape; margin: 0.5cm; }
         body { font-family: 'NotoSansTC', sans-serif !important; font-size: 8pt; }
         table { width: 100%; border-collapse: collapse; }
-        th, td { border: 0.5pt solid #555; padding: 2px 3px; text-align: center; white-space: nowrap; }
-        .bg-dw-head { background-color: #4472C4; color: white; font-weight: bold; }
-        .bg-sh-head { background-color: #BDD7EE; color: black; font-weight: bold; }
-        .bg-weekend { background-color: #FFD966; color: black; }
-        .bg-total   { background-color: #FFF2CC; font-weight: bold; }
+        th, td { border: 0.5pt solid #555; padding: 2px; text-align: center; white-space: nowrap; }
+        .bg-dw-head { background-color: #4472C4; color: white; }
+        .bg-sh-head { background-color: #BDD7EE; color: black; }
+        .bg-weekend { background-color: #FFD966; }
+        .bg-total   { background-color: #FFF2CC; }
         tr { page-break-inside: avoid; }
-        .left { text-align:left; }
-        .right { text-align:right; }
         """
         if font_b64:
             css_str = f"@font-face {{ font-family: 'NotoSansTC'; src: url(data:font/ttf;base64,{font_b64}) format('truetype'); }} " + css_str
@@ -193,11 +208,12 @@ def html_to_pdf_fallback(html_str, font_b64):
         return None, str(e)
 
 # =========================================================
-# 4. Master Configuration（依你規格）
+# 4. 核心資料庫 (依規格書對齊)
 # =========================================================
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
+# 4.1 店數/螢幕數 (注意：家樂福更新 68 / 249)
 STORE_COUNTS_CONFIG = {
     "全省": 4437,
     "北區": 1649, "桃竹苗": 779, "中區": 839, "雲嘉南": 499, "高屏": 490, "東區": 181,
@@ -207,6 +223,7 @@ STORE_COUNTS_CONFIG = {
     "家樂福_量販": 68, "家樂福_超市": 249
 }
 
+# 4.2 價格表 (List=顯示用, Net=計算用)
 PRICING_CONFIG = {
     "全家廣播": {
         "Std_Spots": 480,
@@ -218,7 +235,7 @@ PRICING_CONFIG = {
             "中區":   {"List": 150000, "Net": 120000},
             "雲嘉南": {"List": 100000, "Net": 80000},
             "高屏":   {"List": 100000, "Net": 80000},
-            "東區":   {"List": 62500,  "Net": 50000},
+            "東區":   {"List": 62500,  "Net": 50000}
         }
     },
     "新鮮視": {
@@ -231,17 +248,18 @@ PRICING_CONFIG = {
             "中區":   {"List": 90000,  "Net": 72000},
             "雲嘉南": {"List": 75000,  "Net": 60000},
             "高屏":   {"List": 75000,  "Net": 60000},
-            "東區":   {"List": 45000,  "Net": 36000},
+            "東區":   {"List": 45000,  "Net": 36000}
         }
     },
     "家樂福": {
         "Configs": {
             "量販_全省": {"List": 300000, "Net": 250000, "Std": 420, "Time": "09:00-23:00"},
-            "超市_全省": {"List": 100000, "Net": 80000,  "Std": 720, "Time": "00:00-24:00"},
+            "超市_全省": {"List": 100000, "Net": 80000,  "Std": 720, "Time": "00:00-24:00"}
         }
     }
 }
 
+# 4.3 秒數乘數
 SEC_FACTORS_CONFIG = {
     "全家廣播": {30: 1.0, 20: 0.85, 15: 0.65, 10: 0.5, 5: 0.25},
     "新鮮視":   {30: 3.0, 20: 2.0,  15: 1.5,  10: 1.0, 5: 0.5},
@@ -249,20 +267,14 @@ SEC_FACTORS_CONFIG = {
 }
 
 def get_sec_factor(media_type, seconds):
-    return SEC_FACTORS_CONFIG.get(media_type, {}).get(int(seconds), 1.0)
-
-REGION_DISPLAY_6 = {
-    "北區": "北區-北北基", "桃竹苗": "桃區-桃竹苗", "中區": "中區-中彰投",
-    "雲嘉南": "雲嘉南區-雲嘉南", "高屏": "高屏區-高屏", "東區": "東區-宜花東",
-    "全省量販": "全省量販", "全省超市": "全省超市",
-}
-def region_display(region: str) -> str:
-    return REGION_DISPLAY_6.get(region, region)
+    return SEC_FACTORS_CONFIG.get(media_type, {}).get(seconds, 1.0)
 
 def calculate_schedule(total_spots, days):
+    """
+    讓每天平均，且每天下發偶數（你原本邏輯保留）
+    """
     if days <= 0:
         return []
-    total_spots = int(total_spots)
     if total_spots % 2 != 0:
         total_spots += 1
     half_spots = total_spots // 2
@@ -282,8 +294,16 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
         f"6.付款兌現日期：{p_str}"
     ]
 
+REGION_DISPLAY_6 = {
+    "北區": "北區-北北基", "桃竹苗": "桃區-桃竹苗", "中區": "中區-中彰投",
+    "雲嘉南": "雲嘉南區-雲嘉南", "高屏": "高屏區-高屏", "東區": "東區-宜花東",
+    "全省量販": "全省量販", "全省超市": "全省超市",
+}
+def region_display(region: str) -> str:
+    return REGION_DISPLAY_6.get(region, region)
+
 # =========================================================
-# 5. Excel 輔助：安全寫入 / 樣式 / merge
+# 5. Excel 輔助：安全寫入 / 複製樣式 / 解除合併
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell):
@@ -366,6 +386,9 @@ def set_schedule(ws, row, start_col_letter, max_days, schedule_list):
         v = schedule_list[i] if (schedule_list and i < len(schedule_list)) else None
         safe_write_rc(ws, row, start_col + i, v)
 
+# =========================================================
+# 5.x Excel 動態表格渲染：Block Renderer
+# =========================================================
 def find_row_contains_any(ws, col_letters, keyword):
     for col in col_letters:
         col_idx = column_index_from_string(col)
@@ -402,16 +425,13 @@ def unmerge_overlaps_by_cols(ws, start_row, end_row, col_letters):
         except:
             pass
 
-# =========================================================
-# 5.x Block Renderer（資料區動態、合併儲存格維持）
-# =========================================================
 def detect_blocks(ws, format_type, meta):
     total_pos = find_cell_exact_in_ws(ws, meta["total_label"])
     if not total_pos:
         raise ValueError("找不到 Total")
     total_row = total_pos[0]
 
-    cols_station = meta["cols"]["station"]
+    cols_station = meta["cols"]["station"]  # usually "B"
     search_cols = meta.get("anchor_search_cols", [cols_station, "C", "D"])
 
     rad_kw = meta["anchors"]["全家廣播"]
@@ -450,6 +470,10 @@ def detect_blocks(ws, format_type, meta):
     return blocks, total_row
 
 def build_groups(rows):
+    """
+    media -> seconds -> items
+    另外保留群組屬性（is_national / penalty_factor / std_spots / sec_factor / national_list）
+    """
     reg_map = {r: i for i, r in enumerate(REGIONS_ORDER + ["全省量販", "全省超市"])}
 
     grouped = {}
@@ -463,13 +487,12 @@ def build_groups(rows):
         sec_groups = []
         for sec, items in sorted(sec_map.items(), key=lambda x: x[0]):
             items_sorted = sorted(items, key=lambda x: reg_map.get(x["region"], 999))
-            # 重要：Dongwu 的 H 欄是同秒數群組「只顯示一次」的 Package-cost(Net)
-            pkg_net_total = items_sorted[0].get("pkg_net_total", 0)
+            pkg_sum = sum([x["pkg_display_val"] for x in items_sorted if isinstance(x["pkg_display_val"], int)])
             sec_groups.append({
                 "seconds": sec,
                 "daypart": items_sorted[0].get("daypart", ""),
                 "rows": items_sorted,
-                "pkg_net_total": pkg_net_total
+                "pkg_sum": pkg_sum
             })
         media_groups[m] = sec_groups
 
@@ -522,29 +545,28 @@ def render_block_dongwu(ws, meta, format_type, blk, sec_groups):
     if new_end < s:
         return
 
-    # 避免舊 merge 吞掉 Total/Footer
     unmerge_overlaps_by_cols(ws, s, new_end, ["B", "E", "F", "H"])
 
-    # Station(B) 合併整段
     ws.merge_cells(f"{cols['station']}{s}:{cols['station']}{new_end}")
     top_station = ws[f"{cols['station']}{s}"]
     top_station.value = station_title(format_type, blk["media"])
     apply_center_style(top_station)
 
-    # 逐列寫入
     for i, line in enumerate(lines):
         r = s + i
         item = line["item"]
 
         safe_write(ws, f"{cols['location']}{r}", region_display(item["region"]))
-        safe_write(ws, f"{cols['program']}{r}", int(item.get("program_num", 0)))
-        safe_write(ws, f"{cols['rate']}{r}", int(item.get("rate_display", 0)))
+        prog_val = item.get("program_num", parse_count_to_int(item.get("program", 0)))
+        safe_write(ws, f"{cols['program']}{r}", int(prog_val))
+
+        # Rate (Net) 欄：實際用 List 換算後的單價（不乘 penalty）
+        safe_write(ws, f"{cols['rate']}{r}", item.get("rate_net_display"))
 
         set_schedule(ws, r, meta["schedule_start_col"], meta["max_days"], item.get("schedule", []))
         spot_sum = sum(item.get("schedule", [])[:meta["max_days"]])
         safe_write(ws, f"{meta['total_col']}{r}", spot_sum)
 
-    # 同秒數群組：E/F/H 合併（擬真）
     for g_start, g_end, g in group_ranges:
         r1 = s + g_start
         r2 = s + g_end
@@ -556,12 +578,16 @@ def render_block_dongwu(ws, meta, format_type, blk, sec_groups):
 
         ws.merge_cells(f"{cols['seconds']}{r1}:{cols['seconds']}{r2}")
         cF = ws[f"{cols['seconds']}{r1}"]
-        cF.value = f"{g['seconds']}秒" if blk["media"] == "家樂福" else int(g["seconds"])
+        if blk["media"] == "家樂福":
+            cF.value = f"{g['seconds']}秒"
+        else:
+            cF.value = int(g["seconds"])
         apply_center_style(cF)
 
+        # Package-cost (Net) 欄：群組加總（每列已含 penalty 的 pkg_display_val）
         ws.merge_cells(f"{cols['pkg']}{r1}:{cols['pkg']}{r2}")
         cH = ws[f"{cols['pkg']}{r1}"]
-        cH.value = int(g.get("pkg_net_total", 0))
+        cH.value = int(g["pkg_sum"]) if isinstance(g["pkg_sum"], int) else g["pkg_sum"]
         apply_center_style(cH)
 
 def render_block_shenghuo(ws, meta, format_type, blk, sec_groups):
@@ -588,67 +614,27 @@ def render_block_shenghuo(ws, meta, format_type, blk, sec_groups):
         apply_center_style(ws[f"{cols['station']}{r}"])
 
         safe_write(ws, f"{cols['location']}{r}", region_display(item["region"]))
-        safe_write(ws, f"{cols['program']}{r}", int(item.get("program_num", 0)))
+        prog_val = item.get("program_num", parse_count_to_int(item.get("program", 0)))
+        safe_write(ws, f"{cols['program']}{r}", int(prog_val))
+
         safe_write(ws, f"{cols['daypart']}{r}", g["daypart"])
         safe_write(ws, f"{cols['seconds']}{r}", f"{g['seconds']}秒廣告")
 
+        # 聲活版只顯示「專案價(List)」：沿用 pkg_display_val（你模板定義）
         proj_col = cols.get("proj_price")
         if proj_col:
-            v = item.get("proj_price_val", 0)
-            safe_write(ws, f"{proj_col}{r}", int(v) if isinstance(v, (int, float)) else v)
+            v = item.get("pkg_display_val", 0)
+            safe_write(ws, f"{proj_col}{r}", int(v) if isinstance(v, int) else 0)
 
         set_schedule(ws, r, meta["schedule_start_col"], meta["max_days"], item.get("schedule", []))
         spot_sum = sum(item.get("schedule", [])[:meta["max_days"]])
         safe_write(ws, f"{meta['total_col']}{r}", spot_sum)
 
 # =========================================================
-# 5.y Footer 美化（甲乙方/統編拆分 + VAT 對齊）
+# 5.y Footer 美化（甲乙方/日期 + VAT 區塊對齊）
 # =========================================================
-def _unmerge_if_merged(ws, cell):
-    if not isinstance(cell, MergedCell):
-        # 也可能是 master cell 但屬於 merged range
-        pass
-    for mr in list(ws.merged_cells.ranges):
-        if mr.min_row <= cell.row <= mr.max_row and mr.min_col <= cell.column <= mr.max_col:
-            try:
-                ws.unmerge_cells(str(mr))
-            except:
-                pass
-
-def _split_label_value_in_cell(ws, cell, label_text, value_text, value_merge_to_col=None):
-    """
-    把「甲 方：XXX」這種文字拆成：
-    label cell = '甲方：'
-    value cell(右邊一格起) = 'XXX' 並可合併到指定欄
-    """
-    # 找到該 cell 若在 merged range，先取得左上 master
-    master = _get_master_cell(ws, cell) if isinstance(cell, MergedCell) else cell
-    if master is None:
-        return
-
-    # 若 master 本身在 merge 範圍，先解除
-    _unmerge_if_merged(ws, master)
-
-    r = master.row
-    c = master.column
-    lbl_cell = ws.cell(r, c)
-    lbl_cell.value = label_text
-    apply_right_style(lbl_cell)
-
-    v_start = c + 1
-    v_end = value_merge_to_col if value_merge_to_col and value_merge_to_col >= v_start else v_start
-    try:
-        if v_end > v_start:
-            ws.merge_cells(start_row=r, start_column=v_start, end_row=r, end_column=v_end)
-    except:
-        pass
-
-    val_cell = ws.cell(r, v_start)
-    val_cell.value = value_text
-    apply_left_style(val_cell)
-
 def polish_footer(ws, format_type, meta, client_name):
-    # --- (A) VAT/製作/Grand Total：對齊 + 千分位 ---
+    # VAT / 製作 / Grand Total：label 左、金額右、千分位格式
     lbl = meta["footer_labels"]
     for key in ["make", "vat", "grand"]:
         pos = find_cell_exact_in_ws(ws, lbl.get(key, ""))
@@ -661,95 +647,52 @@ def polish_footer(ws, format_type, meta, client_name):
         apply_left_style(label_cell)
         apply_right_style(val_cell)
 
-        if isinstance(val_cell.value, (int, float)):
-            val_cell.number_format = "#,##0"
+        try:
+            if isinstance(val_cell.value, (int, float)):
+                val_cell.number_format = "#,##0"
+        except:
+            pass
 
         if key == "grand":
             label_cell.font = copy(label_cell.font) if label_cell.font else Font(bold=True)
             val_cell.font = copy(val_cell.font) if val_cell.font else Font(bold=True)
 
-    # 欄寬微調（避免 VAT 區塊擠）
-    try:
-        ws.column_dimensions["G"].width = max(ws.column_dimensions["G"].width or 0, 14)
-        ws.column_dimensions["H"].width = max(ws.column_dimensions["H"].width or 0, 18)
-    except:
-        pass
+    # Dongwu 合約區：甲乙方/日期 標籤對齊 + 乙方公式轉文字（避免轉 PDF 跑版）
+    if format_type == "Dongwu":
+        # 甲方 / 乙方 / 日期 label 清理
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str) and ("甲" in v) and ("方" in v) and ("：" in v):
+                    cell.value = "甲方："
+                    apply_right_style(cell)
+                    # 嘗試把甲方公司那格設左對齊（多為 B 欄的 merged master）
+                    try:
+                        cB = ws.cell(cell.row, column_index_from_string("B"))
+                        if isinstance(cB, MergedCell):
+                            cB = _get_master_cell(ws, cB) or cB
+                        apply_left_style(cB)
+                    except:
+                        pass
 
-    # --- (B) Dongwu：甲乙方/統編 拆分，避免「空白排版很醜」 ---
-    if format_type != "Dongwu":
-        return
+                if isinstance(v, str) and ("乙" in v) and ("方" in v) and ("：" in v):
+                    cell.value = "乙方："
+                    apply_right_style(cell)
 
-    # 甲方：找包含「甲」「方」「：」且後面還有文字
-    for row in ws.iter_rows():
-        for cell in row:
-            v = cell.value
-            if not isinstance(v, str):
-                continue
-            s = v.replace(" ", "").replace("\u3000", "")
-            m = re.match(r"甲方[:：](.+)", s)
-            if m:
-                company = m.group(1)
-                master = _get_master_cell(ws, cell) if isinstance(cell, MergedCell) else cell
-                # 以原本 merged 範圍的最右欄做 value 合併終點（若有）
-                merge_end = master.column
-                for mr in list(ws.merged_cells.ranges):
-                    if mr.min_row <= master.row <= mr.max_row and mr.min_col <= master.column <= mr.max_col:
-                        merge_end = mr.max_col
-                        break
-                _split_label_value_in_cell(ws, master, "甲方：", company, value_merge_to_col=merge_end)
-                break
+                if isinstance(v, str) and "日期" in v and "：" in v:
+                    cell.value = "日期："
+                    apply_right_style(cell)
 
-    # 統一編號：同理拆分（甲方那行常把數字塞一起）
-    for row in ws.iter_rows():
-        for cell in row:
-            v = cell.value
-            if not isinstance(v, str):
-                continue
-            s = v.replace(" ", "").replace("\u3000", "")
-            m = re.match(r"統一編號[:：]([0-9]+)", s)
-            if m:
-                taxid = m.group(1)
-                master = _get_master_cell(ws, cell) if isinstance(cell, MergedCell) else cell
-                merge_end = master.column
-                for mr in list(ws.merged_cells.ranges):
-                    if mr.min_row <= master.row <= mr.max_row and mr.min_col <= master.column <= mr.max_col:
-                        merge_end = mr.max_col
-                        break
-                _split_label_value_in_cell(ws, master, "統一編號：", taxid, value_merge_to_col=merge_end)
-                break
-
-    # 乙方：把「乙       方：」改乾淨；若同列有 =$C$3 或客戶名，直接覆蓋成純文字避免跑版
-    for row in ws.iter_rows():
-        for cell in row:
-            v = cell.value
-            if not isinstance(v, str):
-                continue
-            s = v.replace(" ", "").replace("\u3000", "")
-            if s.startswith("乙方"):
-                # 清 label
-                master = _get_master_cell(ws, cell) if isinstance(cell, MergedCell) else cell
-                _unmerge_if_merged(ws, master)
-                master.value = "乙方："
-                apply_right_style(master)
-
-                # 嘗試找同列客戶名稱 cell（常見 =$C$3）
-                rr = master.row
-                found = None
-                for cc in range(master.column + 1, min(master.column + 20, ws.max_column) + 1):
-                    vv = ws.cell(rr, cc).value
-                    if isinstance(vv, str) and vv.startswith("=") and "$C$3" in vv:
-                        found = (rr, cc)
-                        break
-                    if isinstance(vv, str) and client_name in vv:
-                        found = (rr, cc)
-                        break
-                if found:
-                    ws.cell(found[0], found[1]).value = client_name
-                    apply_left_style(ws.cell(found[0], found[1]))
-                break
+        # 乙方名稱：把「=$C$3」這類公式改成純文字
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    if "$C$3" in cell.value:
+                        cell.value = client_name
+                        apply_left_style(cell)
 
 # =========================================================
-# 5.z Sheet Meta（盡量不覆蓋模板表頭文字）
+# 5.z Sheet Meta（表頭文字對齊規格：Rate (Net) / Package-cost (Net)）
 # =========================================================
 SHEET_META = {
     "Dongwu": {
@@ -763,6 +706,10 @@ SHEET_META = {
         "carrefour_data_offset": 0,
         "header_cells": {"client": "C3", "product": "C4", "period": "C5", "medium": "C6", "month": "I6"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "rate": "G", "pkg": "H"},
+        "header_override": {
+            "G7": "rate\n(Net)",
+            "H7": "Package-cost\n(Net)"
+        },
         "total_label": "Total",
         "footer_labels": {"make": "製作", "vat": "5% VAT", "grand": "Grand Total"},
         "force_center_cols": ["E", "F", "G", "H"],
@@ -778,6 +725,7 @@ SHEET_META = {
         "carrefour_data_offset": 0,
         "header_cells": {"client": "C5", "product": "C6", "month": "G6"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "proj_price": "AF"},
+        "header_override": {"AF7": "專案價\n(List)"},
         "total_label": "Total",
         "footer_labels": {"make": "製作", "vat": "5% VAT", "grand": "Grand Total"},
         "force_center_cols": [],
@@ -785,9 +733,49 @@ SHEET_META = {
 }
 
 # =========================================================
-# 5.main Excel 產生（Block Renderer + Value Anchor Total）
+# 5.zz Overall Total 計算（關鍵：全省要用「全省 List 覆蓋」而非上方分區加總）
 # =========================================================
-def generate_excel_from_template(format_type, start_dt, end_dt, client_name, product_display_str, rows, remarks_list, template_bytes, total_pkg_override=None):
+def compute_overall_package_total(rows):
+    """
+    依你最終規則：
+    - group_key = (media_type, seconds)
+    - 若該群 is_national=True：
+        Total_Package = (National_List / Std) * Sec_Factor * Spots * Penalty_Factor
+      （注意：Rate 不乘 penalty，但 Package 要乘）
+    - 若 is_national=False：
+        Total_Package = sum(各 row pkg_display_val int)  （pkg 已包含 penalty）
+    """
+    groups = {}
+    for r in rows:
+        key = (r.get("media_type"), r.get("seconds"))
+        groups.setdefault(key, []).append(r)
+
+    total = 0
+    for _, items in groups.items():
+        if not items:
+            continue
+        r0 = items[0]
+        is_national = bool(r0.get("is_national", False))
+        if is_national:
+            national_list = r0.get("national_list_price", 0)
+            std_spots = r0.get("std_spots", 1)
+            sec_factor = r0.get("sec_factor", 1.0)
+            spots = r0.get("spots_final", 0)
+            penalty = r0.get("penalty_factor", 1.0)
+            try:
+                group_total = int(round(((national_list / std_spots) * sec_factor) * spots * penalty))
+            except:
+                group_total = 0
+            total += group_total
+        else:
+            group_total = sum([x["pkg_display_val"] for x in items if isinstance(x.get("pkg_display_val"), int)])
+            total += int(group_total)
+    return int(total)
+
+# =========================================================
+# 5.main Excel 產生（整合 Block Renderer + Footer Polish + Total 覆蓋）
+# =========================================================
+def generate_excel_from_template(format_type, start_dt, end_dt, client_name, product_display_str, rows, remarks_list, template_bytes):
     meta = SHEET_META[format_type]
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
 
@@ -815,11 +803,13 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         safe_write(ws, hc["month"], f" {start_dt.month}月")
 
     safe_write(ws, meta["date_start_cell"], datetime(start_dt.year, start_dt.month, start_dt.day))
+    for addr, text in meta.get("header_override", {}).items():
+        safe_write(ws, addr, text)
 
     # 3) 找 blocks + total row
     blocks, total_row_orig = detect_blocks(ws, format_type, meta)
 
-    # 4) 先解 merge（避免 Total/Footer 被吞）
+    # 4) 先解除資料區 merge（避免 Total/Footer 被吞）
     data_start = min(b["start"] for b in blocks)
     data_end = total_row_orig - 1
     if format_type == "Dongwu":
@@ -848,7 +838,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         raise ValueError("渲染後找不到 Total（可能 Total 被模板 merge/公式影響）")
     total_row = total_pos[0]
 
-    # 8) Total 檔次計算（每日加總）
+    # 8) Total 檔次（你原本的：把 rows schedule 全部加總）
     eff_days = min((end_dt - start_dt).days + 1, meta["max_days"])
     daily_sums = [0] * eff_days
     for x in rows:
@@ -859,36 +849,47 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     set_schedule(ws, total_row, meta["schedule_start_col"], meta["max_days"], daily_sums)
     safe_write(ws, f"{meta['total_col']}{total_row}", sum(daily_sums))
 
-    # 9) Total Row Package-cost（Value Anchor 覆蓋）
+    # 9) Total Package：關鍵覆蓋（全省群組不可用上方分區加總）
     cols = meta["cols"]
     pkg_col = cols.get("pkg") or cols.get("proj_price")
-    if pkg_col:
-        pkg_total = int(total_pkg_override) if isinstance(total_pkg_override, (int, float)) else None
-        if pkg_total is None:
-            # fallback：避免把每列重複的 group 值加爆，改用 unique group key
-            seen = set()
-            ssum = 0
-            for r in rows:
-                k = (r.get("media_type"), r.get("seconds"))
-                if k in seen:
-                    continue
-                seen.add(k)
-                ssum += int(r.get("pkg_net_total", 0))
-            pkg_total = ssum
-        safe_write(ws, f"{pkg_col}{total_row}", int(pkg_total))
 
-    # 10) Remarks
+    overall_pkg_total = compute_overall_package_total(rows)
+    if pkg_col:
+        safe_write(ws, f"{pkg_col}{total_row}", overall_pkg_total)
+
+    # 10) Footer (make/vat/grand) — VAT 依 overall_pkg_total 算
+    lbl = meta["footer_labels"]
+    make_fee = 10000
+    pos_make = find_cell_exact_in_ws(ws, lbl["make"])
+    if pos_make:
+        v = ws.cell(pos_make[0], pos_make[1] + 1).value
+        if isinstance(v, (int, float)) and v > 0:
+            make_fee = int(v)
+        else:
+            safe_write_rc(ws, pos_make[0], pos_make[1] + 1, make_fee)
+
+    vat = int(round((overall_pkg_total + make_fee) * 0.05))
+
+    pos_vat = find_cell_exact_in_ws(ws, lbl["vat"])
+    if pos_vat:
+        safe_write_rc(ws, pos_vat[0], pos_vat[1] + 1, vat)
+
+    pos_grand = find_cell_exact_in_ws(ws, lbl["grand"])
+    if pos_grand:
+        safe_write_rc(ws, pos_grand[0], pos_grand[1] + 1, overall_pkg_total + make_fee + vat)
+
+    # 11) Remarks
     rem_pos = find_cell_exact_in_ws(ws, "Remarks：")
     if rem_pos:
         for i, rm in enumerate(remarks_list):
             safe_write_rc(ws, rem_pos[0] + 1 + i, rem_pos[1], rm)
 
-    # 11) Dongwu 欄位置中
+    # 12) Dongwu 欄位置中
     if format_type == "Dongwu":
         min_data_row = min(b["start"] for b in blocks)
         force_center_columns_range(ws, meta["force_center_cols"], min_data_row, total_row)
 
-    # 12) Footer（VAT/甲乙方）
+    # 13) Footer 美化（甲乙方/日期 + VAT 對齊）
     polish_footer(ws, format_type, meta, client_name)
 
     out = io.BytesIO()
@@ -896,7 +897,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 6. HTML Preview（Dongwu row-span 擬真）
+# 6. HTML Preview（與 Excel 共用 rows，且 Total Package 同規則覆蓋）
 # =========================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
@@ -915,7 +916,7 @@ def load_font_base64():
         pass
     return None
 
-def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, total_pkg_override=None):
+def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks):
     header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
     eff_days = min(days_cnt, 31)
@@ -943,100 +944,73 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         curr += timedelta(days=1)
 
     if format_type == "Dongwu":
-        cols_def = ["Station", "Location", "Program", "Day-part", "Size", "rate<br>(Net)", "Package-cost<br>(Net)"]
+        cols_def = ["Station", "Location", "Program", "Day-part", "Size", "rate<br>(Net)", "Package<br>(Net)"]
     else:
         cols_def = ["頻道", "播出地區", "播出店數", "播出時間", "秒數<br>規格", "專案價"]
+
     th_fixed = "".join([f"<th rowspan='2'>{c}</th>" for c in cols_def])
 
-    # 排序
     rows_sorted = sorted(
         rows,
         key=lambda x: (
             media_order.get(x["media_type"], 99),
-            int(x.get("seconds", 0)),
+            x["seconds"],
             REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99
         )
     )
 
-    # 計 rowspan
+    tbody = ""
     media_counts = {}
-    sec_counts = {}  # (media, sec) -> count
     for r in rows_sorted:
         media_counts[r["media_type"]] = media_counts.get(r["media_type"], 0) + 1
-        sec_counts[(r["media_type"], r["seconds"])] = sec_counts.get((r["media_type"], r["seconds"]), 0) + 1
-
-    tbody = ""
-    printed_media = set()
-    printed_sec = set()
+    media_printed = {m: False for m in media_counts}
 
     for r in rows_sorted:
         m = r["media_type"]
-        sec = r["seconds"]
-        key_ms = (m, sec)
-
         tbody += "<tr>"
 
-        # Station rowspan（Dongwu 才合併）
-        if format_type == "Dongwu":
-            if m not in printed_media:
-                printed_media.add(m)
-                rowspan = media_counts[m]
-                display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
+        if not media_printed[m]:
+            rowspan = media_counts[m]
+            display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
+            if format_type == "Shenghuo" and m == "全家廣播":
+                display_name = "全家便利商店<br>廣播通路廣告"
+            if format_type == "Shenghuo":
+                tbody += f"<td class='left'>{display_name}</td>"
+            else:
                 tbody += f"<td class='left' rowspan='{rowspan}'>{display_name}</td>"
-        else:
+                media_printed[m] = True
+        elif format_type == "Shenghuo":
             display_name = "全家便利商店<br>廣播通路廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
             tbody += f"<td class='left'>{display_name}</td>"
 
-        # Location / Program
-        tbody += f"<td>{region_display(r['region'])}</td>"
-        tbody += f"<td class='right'>{r.get('program_num','')}</td>"
+        tbody += f"<td>{region_display(r['region'])}</td><td class='right'>{r.get('program_num','')}</td><td>{r['daypart']}</td>"
+        sec_txt = f"{r['seconds']}秒" if format_type == "Dongwu" and m == "家樂福" else f"{r['seconds']}" if format_type == "Dongwu" else f"{r['seconds']}秒廣告"
+        tbody += f"<td>{sec_txt}</td>"
 
         if format_type == "Dongwu":
-            # Day-part / Size / Package-cost：同媒體同秒數 group 做 rowspan 擬真
-            if key_ms not in printed_sec:
-                printed_sec.add(key_ms)
-                rowspan_s = sec_counts[key_ms]
-                tbody += f"<td rowspan='{rowspan_s}'>{html_escape(r.get('daypart',''))}</td>"
-                tbody += f"<td rowspan='{rowspan_s}'>{int(sec)}</td>"
-                # rate（每列）
-                tbody += f"<td class='right'>{int(r.get('rate_display', 0)):,}</td>"
-                # package（只顯示一次）
-                pkg_show = int(r.get("pkg_net_total", 0))
-                tbody += f"<td class='right' rowspan='{rowspan_s}'>{pkg_show:,}</td>"
-            else:
-                # rate（每列）
-                tbody += f"<td class='right'>{int(r.get('rate_display', 0)):,}</td>"
+            rate = r.get("rate_net_display", "")
+            pkg = r.get("pkg_display_val", "")
+            rate_txt = f"{rate:,}" if isinstance(rate, int) else rate
+            pkg_txt = f"{pkg:,}" if isinstance(pkg, int) else pkg
+            tbody += f"<td class='right'>{rate_txt}</td><td class='right'>{pkg_txt}</td>"
         else:
-            tbody += f"<td>{html_escape(r.get('daypart',''))}</td>"
-            tbody += f"<td>{int(r.get('seconds',0))}秒廣告</td>"
-            tbody += f"<td class='right'>{int(r.get('proj_price_val',0)):,}</td>"
+            pkg = r.get("pkg_display_val", "")
+            pkg_txt = f"{pkg:,}" if isinstance(pkg, int) else pkg
+            tbody += f"<td class='right'>{pkg_txt}</td>"
 
-        # 日檔次
         for d in r['schedule'][:eff_days]:
             tbody += f"<td>{d}</td>"
-
-        tbody += f"<td class='bg-total'>{sum(r['schedule'][:eff_days])}</td></tr>"
+        tbody += f"<td class='bg-total'>{sum(r['schedule'])}</td></tr>"
 
     totals = [sum([r["schedule"][d] for r in rows if d < len(r["schedule"])]) for d in range(eff_days)]
-
-    # Total Row Package-cost（用 override）
-    if total_pkg_override is None:
-        seen = set()
-        ssum = 0
-        for r in rows:
-            k = (r.get("media_type"), r.get("seconds"))
-            if k in seen:
-                continue
-            seen.add(k)
-            ssum += int(r.get("pkg_net_total", 0))
-        total_pkg_override = ssum
+    overall_pkg_total = compute_overall_package_total(rows)
 
     if format_type == "Dongwu":
-        colspan = 6
-        tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='left'>Total</td><td class='right'>{int(total_pkg_override):,}</td>"
+        colspan = 5
+        tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='left'>Total</td><td></td><td class='right'>{overall_pkg_total:,}</td>"
     else:
         colspan = 5
-        tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='left'>Total</td><td class='right'>{int(total_pkg_override):,}</td>"
+        tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='left'>Total</td><td class='right'>{overall_pkg_total:,}</td>"
 
     for t in totals:
         tfoot += f"<td>{t}</td>"
@@ -1050,70 +1024,9 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     <div class="remarks"><b>Remarks：</b><br>{"<br>".join([html_escape(x) for x in remarks])}</div></div>"""
 
 # =========================================================
-# 7. 商業計算核心（依你規格修正）
+# 7. UI Main
 # =========================================================
-def calc_spots_and_group_pkg(media, sec, budget_alloc, is_national, regions):
-    """
-    回傳：
-    - spots_final
-    - penalty_applied(bool)
-    - unit_cost_net（含 sec factor / 未含 penalty）
-    - group_pkg_net_total（Package-cost(Net) 要顯示的整包金額）
-    - display_regions（要展開顯示的區域）
-    """
-    sec = int(sec)
-    factor = get_sec_factor(media, sec)
-
-    if media in ("全家廣播", "新鮮視"):
-        cfg = PRICING_CONFIG[media]
-        std = cfg["Std_Spots"]
-        prices = cfg["Prices"]
-
-        if is_national:
-            base_net = prices["全省"]["Net"]
-            display_regions = REGIONS_ORDER[:]  # 固定展開六區
-        else:
-            # 分區：用選定區域 net 加總
-            base_net = sum(prices[r]["Net"] for r in regions)
-            display_regions = regions[:]
-
-        unit_cost_net = (base_net / std) * factor
-        spots_init = ceil_div(budget_alloc, unit_cost_net)
-        penalty = 1.1 if spots_init < std else 1.0
-        spots_final = ceil_div(budget_alloc, unit_cost_net * penalty)
-
-        if spots_final % 2 != 0:
-            spots_final += 1
-        if spots_final <= 0:
-            spots_final = 2
-
-        # Package-cost(Net)：用「含 penalty 後」的單檔成本 * spots（這樣總額會貼近預算邏輯）
-        group_pkg_net_total = int(round((unit_cost_net * penalty) * spots_final))
-
-        return spots_final, (penalty > 1.0), unit_cost_net, group_pkg_net_total, display_regions, std, factor
-
-    # 家樂福：以量販為基準算 spots，超市按比例推 spots
-    if media == "家樂福":
-        conf = PRICING_CONFIG["家樂福"]["Configs"]
-        base = conf["量販_全省"]
-        std = base["Std"]
-        unit_cost_net = (base["Net"] / std) * factor
-        spots_init = ceil_div(budget_alloc, unit_cost_net)
-        penalty = 1.1 if spots_init < std else 1.0
-        spots_final = ceil_div(budget_alloc, unit_cost_net * penalty)
-        if spots_final % 2 != 0:
-            spots_final += 1
-        if spots_final <= 0:
-            spots_final = 2
-        group_pkg_net_total = int(round((unit_cost_net * penalty) * spots_final))
-        return spots_final, (penalty > 1.0), unit_cost_net, group_pkg_net_total, ["全省"], std, factor
-
-    return 0, False, 0, 0, [], 0, factor
-
-# =========================================================
-# 8. UI Main
-# =========================================================
-st.title("📺 媒體 Cue 表生成器 (v66.0)")
+st.title("📺 媒體 Cue 表生成器 (v66.0 - Spec aligned)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -1125,6 +1038,10 @@ else:
     tpl = st.file_uploader("上傳 Excel 模板", type=["xlsx"])
     if tpl:
         template_bytes = tpl.read()
+
+if msgs:
+    for m in msgs:
+        st.info(m)
 
 st.markdown("### 1. 選擇格式")
 format_type = st.radio("", ["Dongwu", "Shenghuo"], horizontal=True, label_visibility="collapsed")
@@ -1275,160 +1192,194 @@ if is_cf:
         config["家樂福"] = {"regions": ["全省"], "seconds": sorted(secs), "share": st.session_state.cf_share, "sec_shares": sec_shares}
 
 # ---------------------------------------------------------
-# 計算引擎（rows + group total）
+# 計算引擎（核心：Rate 不乘 penalty；Package 乘 penalty；Total 覆蓋）
 # ---------------------------------------------------------
 rows = []
 debug_logs = []
-total_pkg_override = 0
+
+def calc_spots_and_penalty(budget_alloc, unit_cost, std_spots):
+    spots_init = ceil_int(budget_alloc / unit_cost) if unit_cost > 0 else 0
+    penalty_factor = 1.1 if spots_init < std_spots else 1.0
+
+    if penalty_factor > 1.0:
+        spots_final = ceil_int(budget_alloc / (unit_cost * penalty_factor)) if unit_cost > 0 else 0
+    else:
+        spots_final = spots_init
+
+    if spots_final % 2 != 0:
+        spots_final += 1
+    if spots_final <= 0:
+        spots_final = 2
+    return spots_init, spots_final, penalty_factor
 
 if config:
-    for m, cfg in config.items():
-        m_budget = total_budget_input * (cfg["share"] / 100.0)
+    for media, cfg in config.items():
+        media_budget = total_budget_input * (cfg["share"] / 100.0)
+
         for sec, sec_pct in cfg["sec_shares"].items():
-            s_budget = m_budget * (sec_pct / 100.0)
-            if s_budget <= 0:
+            sec_budget = media_budget * (sec_pct / 100.0)
+            if sec_budget <= 0:
                 continue
 
-            if m in ["全家廣播", "新鮮視"]:
-                is_nat = bool(cfg.get("is_national"))
-                sel_regions = cfg["regions"]
-                spots_final, penalty_applied, unit_cost_net, group_pkg_net_total, display_regions, std, factor = \
-                    calc_spots_and_group_pkg(m, sec, s_budget, is_nat, sel_regions if not is_nat else REGIONS_ORDER)
+            sec_factor = get_sec_factor(media, sec)
+
+            # -------- 全家廣播 / 新鮮視 --------
+            if media in ["全家廣播", "新鮮視"]:
+                p = PRICING_CONFIG[media]
+                std = p["Std_Spots"]
+                daypart = p["Day_Part"]
+                prices = p["Prices"]
+
+                is_national = bool(cfg.get("is_national", False))
+
+                # 計算用 Base_Net
+                if is_national:
+                    base_net = prices["全省"]["Net"]  # 規格書：全省 Net
+                    calc_regions = ["全省"]
+                    display_regions = REGIONS_ORDER  # 規則：全省也要展開 6 區顯示
+                else:
+                    # 分區：加總選定區域 Net
+                    selected = [r for r in cfg.get("regions", []) if r in REGIONS_ORDER]
+                    if not selected:
+                        continue
+                    base_net = sum([prices[r]["Net"] for r in selected])
+                    calc_regions = selected
+                    display_regions = selected
+
+                unit_cost = (base_net / std) * sec_factor
+                spots_init, spots_final, penalty_factor = calc_spots_and_penalty(sec_budget, unit_cost, std)
 
                 sch = calculate_schedule(spots_final, days_count)
 
-                # Total Row 的 Package-cost(Net) 用「每個群組」加總
-                total_pkg_override += int(group_pkg_net_total)
-
                 debug_logs.append({
-                    "media": m, "sec": int(sec), "budget": s_budget,
-                    "unit_cost_net": unit_cost_net,
-                    "spots": spots_final,
-                    "std": std,
-                    "factor": factor,
-                    "status": "未達標" if penalty_applied else "達標",
-                    "reason": "懲罰 x1.1" if penalty_applied else "費率正常",
-                    "pkg_net_total": int(group_pkg_net_total),
-                    "mode": "全省" if is_nat else "分區"
+                    "media": media, "sec": sec, "budget": sec_budget,
+                    "unit_cost": unit_cost * penalty_factor, "spots": spots_final,
+                    "std": std, "factor": sec_factor,
+                    "status": "未達標" if penalty_factor > 1 else "達標",
+                    "reason": "懲罰 x1.1" if penalty_factor > 1 else "費率正常",
+                    "is_national": is_national
                 })
 
-                prices = PRICING_CONFIG[m]["Prices"]
-                daypart = PRICING_CONFIG[m]["Day_Part"]
+                for region in display_regions:
+                    list_price = prices[region]["List"]
+                    # Rate (Net) 欄：用 List 換算，不乘 penalty
+                    rate_net_display = int(round((list_price / std) * sec_factor))
+                    # Package-cost (Net) 欄：rate * spots * penalty
+                    pkg_display = int(round(rate_net_display * spots_final * penalty_factor))
 
-                # 展開顯示列：全省 -> 固定六區；分區 -> 選定區域
-                for rgn in (REGIONS_ORDER if is_nat else sel_regions):
-                    list_price = prices[rgn]["List"]
-                    rate_display = int((list_price / std) * factor)  # 欺敵：用 List 換算單價
-
-                    program_key = f"新鮮視_{rgn}" if m == "新鮮視" else rgn
-                    program_num = int(STORE_COUNTS_CONFIG.get(program_key, 0))
+                    program_key = f"新鮮視_{region}" if media == "新鮮視" else region
+                    program_num = STORE_COUNTS_CONFIG.get(program_key, 0)
 
                     rows.append({
-                        "media_type": m,
-                        "region": rgn,
+                        "media_type": media,
+                        "region": region,
                         "program_num": program_num,
                         "daypart": daypart,
-                        "seconds": int(sec),
+                        "seconds": sec,
+                        "spots_final": spots_final,
+                        "penalty_factor": penalty_factor,
+                        "is_national": is_national,
+                        "std_spots": std,
+                        "sec_factor": sec_factor,
+                        "national_list_price": prices["全省"]["List"],
                         "schedule": sch,
-                        "rate_display": rate_display,
-                        "pkg_net_total": int(group_pkg_net_total),  # 同群組一致（Excel/HTML 會合併顯示）
+                        "rate_net_display": rate_net_display,
+                        "pkg_display_val": pkg_display
                     })
 
-            elif m == "家樂福":
-                # 家樂福：以量販計算 spots，再推超市 spots
-                is_nat = True
-                spots_final, penalty_applied, unit_cost_net, group_pkg_net_total, _, std, factor = \
-                    calc_spots_and_group_pkg(m, sec, s_budget, is_nat, ["全省"])
+            # -------- 家樂福 --------
+            elif media == "家樂福":
+                cfgs = PRICING_CONFIG["家樂福"]["Configs"]
+                h = cfgs["量販_全省"]
+                s = cfgs["超市_全省"]
 
+                std_h = h["Std"]
+                unit_cost = (h["Net"] / std_h) * sec_factor
+
+                spots_init, spots_final, penalty_factor = calc_spots_and_penalty(sec_budget, unit_cost, std_h)
                 sch_h = calculate_schedule(spots_final, days_count)
 
-                total_pkg_override += int(group_pkg_net_total)
-
                 debug_logs.append({
-                    "media": m, "sec": int(sec), "budget": s_budget,
-                    "unit_cost_net": unit_cost_net,
-                    "spots": spots_final,
-                    "std": std,
-                    "factor": factor,
-                    "status": "未達標" if penalty_applied else "達標",
-                    "reason": "懲罰 x1.1" if penalty_applied else "費率正常",
-                    "pkg_net_total": int(group_pkg_net_total),
-                    "mode": "鎖定"
+                    "media": media, "sec": sec, "budget": sec_budget,
+                    "unit_cost": unit_cost * penalty_factor, "spots": spots_final,
+                    "std": std_h, "factor": sec_factor,
+                    "status": "未達標" if penalty_factor > 1 else "達標",
+                    "reason": "懲罰 x1.1" if penalty_factor > 1 else "費率正常",
+                    "is_national": False
                 })
 
-                # 顯示：量販 + 超市（超市依 Std 比例推 spots）
-                conf = PRICING_CONFIG["家樂福"]["Configs"]
-                base_std = conf["量販_全省"]["Std"]
-                std_s = conf["超市_全省"]["Std"]
+                # 量販：rate (Net) 用 List 換算，不乘 penalty；package 乘 penalty
+                rate_h = int(round((h["List"] / std_h) * sec_factor))
+                pkg_h = int(round(rate_h * spots_final * penalty_factor))
 
-                spots_s = int(spots_final * (std_s / base_std))
+                rows.append({
+                    "media_type": media, "region": "全省量販",
+                    "program_num": STORE_COUNTS_CONFIG.get("家樂福_量販", 0),
+                    "daypart": h["Time"],
+                    "seconds": sec,
+                    "spots_final": spots_final,
+                    "penalty_factor": penalty_factor,
+                    "is_national": False,
+                    "std_spots": std_h,
+                    "sec_factor": sec_factor,
+                    "national_list_price": 0,
+                    "schedule": sch_h,
+                    "rate_net_display": rate_h,
+                    "pkg_display_val": pkg_h
+                })
+
+                # 超市：維持你原本「計量販」呈現（但店數與時段照實）
+                spots_s = int(spots_final * (s["Std"] / std_h))
                 sch_s = calculate_schedule(spots_s, days_count)
 
-                # rate_display：家樂福在 Dongwu 的 G 欄仍是「List 換算單價」的參考
-                list_unit_h = int((conf["量販_全省"]["List"] / base_std) * factor)
-                list_unit_s = int((conf["超市_全省"]["List"] / std_s) * factor)
-
                 rows.append({
-                    "media_type": m,
-                    "region": "全省量販",
-                    "program_num": int(STORE_COUNTS_CONFIG.get("家樂福_量販", 0)),
-                    "daypart": conf["量販_全省"]["Time"],
-                    "seconds": int(sec),
-                    "schedule": sch_h,
-                    "rate_display": list_unit_h,
-                    "pkg_net_total": int(group_pkg_net_total),
-                })
-                rows.append({
-                    "media_type": m,
-                    "region": "全省超市",
-                    "program_num": int(STORE_COUNTS_CONFIG.get("家樂福_超市", 0)),
-                    "daypart": conf["超市_全省"]["Time"],
-                    "seconds": int(sec),
+                    "media_type": media, "region": "全省超市",
+                    "program_num": STORE_COUNTS_CONFIG.get("家樂福_超市", 0),
+                    "daypart": s["Time"],
+                    "seconds": sec,
+                    "spots_final": spots_s,
+                    "penalty_factor": penalty_factor,
+                    "is_national": False,
+                    "std_spots": s["Std"],
+                    "sec_factor": sec_factor,
+                    "national_list_price": 0,
                     "schedule": sch_s,
-                    "rate_display": list_unit_s,
-                    "pkg_net_total": int(group_pkg_net_total),
+                    "rate_net_display": "計量販",
+                    "pkg_display_val": "計量販"
                 })
 
 p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}" if rows else ""
 rem = get_remarks_text(sign_deadline, billing_month, payment_date)
 
 with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
-    st.markdown("#### 1. 本次預算分配 / 檔次 / Package-cost(Net)")
+    st.markdown("#### 1. 本次預算分配 / 檔次計算（Hidden Calculation）")
     for log in debug_logs:
         color = "green" if log["status"] == "達標" else "red"
+        nat = "全省" if log.get("is_national") else "分區"
         st.markdown(
-            f"**{log['media']} ({log['sec']}秒 / {log['mode']})**: "
-            f"預算 ${log['budget']:,.0f} | 檔次 {log['spots']} "
-            f"| Package(Net) ${log['pkg_net_total']:,.0f} -> "
-            f"<span style='color:{color}'><b>{log['status']}</b></span>",
+            f"**{log['media']} ({log['sec']}秒, {nat})**: 預算 ${log['budget']:,.0f} | 執行 {log['spots']} 檔 "
+            f"→ <span style='color:{color}'><b>{log['status']}</b></span> ({log['reason']})",
             unsafe_allow_html=True
         )
 
-# ---------------------------------------------------------
-# 輸出
-# ---------------------------------------------------------
 if rows:
     font_b64 = load_font_base64()
-    html = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, total_pkg_override=total_pkg_override)
-    st.components.v1.html(html, height=720, scrolling=True)
+    html = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem)
+    st.components.v1.html(html, height=700, scrolling=True)
 
     if template_bytes:
         try:
-            xlsx = generate_excel_from_template(
-                format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes,
-                total_pkg_override=total_pkg_override
-            )
+            xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes)
             st.download_button("下載 Excel", xlsx, f"Cue_{safe_filename(client_name)}.xlsx")
 
-            # PDF：先試 Excel/LO，失敗再用 WeasyPrint（雲端擬真）
             pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx)
             if pdf_bytes:
                 st.download_button(f"下載 PDF ({method})", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
             else:
-                st.warning(f"Excel 轉 PDF 失敗 ({method}: {err})，切換至 WeasyPrint 擬真輸出 (HTML)...")
+                st.warning(f"Excel 轉 PDF 失敗 ({method}: {err})，切換至備用渲染引擎 (HTML)...")
                 pdf_bytes, err2 = html_to_pdf_fallback(html, font_b64)
                 if pdf_bytes:
-                    st.download_button("下載 PDF (WeasyPrint)", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
+                    st.download_button("下載 PDF (Fallback)", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
                 else:
                     st.error(f"PDF 產出失敗: {err2}")
 
