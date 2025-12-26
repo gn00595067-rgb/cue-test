@@ -553,8 +553,10 @@ if config:
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
             
             pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx.getvalue())
+            
             if pdf_bytes:
                 st.download_button(f"下載 PDF ({method})", pdf_bytes, f"Cue_{client_name}.pdf")
             else:
                 st.error(f"PDF 產出失敗: {err}")
+                
         except Exception as e: st.error(f"Excel 產出錯誤: {e}")
