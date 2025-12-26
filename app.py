@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.1 (Value Anchor)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.2 (Value Anchor Fix)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -226,7 +226,7 @@ REGION_DISPLAY_6 = {
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
 
 # =========================================================
-# 5. Excel 生成模組 (Dynamic Rebuild)
+# 5. Excel 生成模組
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell): return cell
@@ -431,7 +431,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 if m_key == "家樂福": safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒")
                 else: safe_write(ws, f"{cols['seconds']}{curr_row}", int(r_data["seconds"]))
                 
-                # 🌟 [關鍵修正]：每一列都顯示分區定價 (Value Anchor)
+                # 🌟 關鍵修正：每一列都寫入分區定價 (Value Anchor)
                 safe_write(ws, f"{cols['rate']}{curr_row}", r_data["rate_list"])
                 safe_write(ws, f"{cols['pkg']}{curr_row}", r_data["pkg_display_val"])
             else:
@@ -456,37 +456,25 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     set_schedule(ws, total_row, meta["schedule_start_col"], meta["max_days"], daily_sums)
     safe_write(ws, f"{meta['total_col']}{total_row}", sum(daily_sums))
     
-    # 🌟 [總金額覆蓋邏輯]：全省聯播時，Total 用 National Package Price
+    # 🌟 關鍵修正：Total Row 覆蓋邏輯 (Total Override)
+    # 不累加分區價，而是偵測是否為全省聯播，如果是，加上全省優惠總價
     total_pkg = 0
-    # 先計算家樂福的部分 (它沒有全省/分區之分，直接累加)
-    # 然後處理廣播/新鮮視：如果是全省聯播，直接加上全省總價
-    
-    # 為了簡化，我們重新掃描 Rows 來計算
-    # 這裡需要一個 flag 來避免重複計算全省的總價
-    processed_national_media = set()
+    processed_national = set()
     
     for r in rows:
         m = r["media_type"]
         val = r["pkg_display_val"] if isinstance(r["pkg_display_val"], int) else 0
         
         if r.get("is_national_display"):
-            if m not in processed_national_media:
-                # 找到對應的全省定價 (List)
-                # 從 r 裡面反推有點麻煩，直接從 PRICING_DB 拿最準
+            if m not in processed_national:
+                # 重新計算「全省優惠總價」作為 Total 的成分
                 factor = SEC_FACTORS[m][r["seconds"]]
                 std = PRICING_DB[m]["Std_Spots"]
-                nat_list_price = PRICING_DB[m]["全省"][0] # 400k or 150k
-                
-                # 計算全省總價 = 單檔定價 * 總檔次
-                # 這裡的 "總檔次" 是 "全省檔次" (1766)，不是 6 區加總 (10596)
-                # rows 裡的 spots 已經是 1766
-                # Rate = 400k / 480 * Factor
-                # Total = Rate * 1766
-                nat_rate = int((nat_list_price / std) * factor)
-                nat_total = nat_rate * r["spots"]
-                
-                total_pkg += nat_total
-                processed_national_media.add(m)
+                nat_list = PRICING_DB[m]["全省"][0] # $400k or $150k
+                nat_rate = int((nat_list / std) * factor)
+                # 這裡的 r["spots"] 是用 Net 算出來的總檔次，符合邏輯
+                total_pkg += nat_rate * r["spots"]
+                processed_national.add(m)
         else:
             total_pkg += val
 
@@ -594,7 +582,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         sec_txt = f"{r['seconds']}秒" if format_type=="Dongwu" and m=="家樂福" else f"{r['seconds']}" if format_type=="Dongwu" else f"{r['seconds']}秒廣告"
         tbody += f"<td>{sec_txt}</td>"
         
-        # 顯示邏輯：全部顯示 (Value Anchor)
+        # 顯示邏輯：每一列都顯示分區價 (Value Anchor)
         rate = f"{r['rate_list']:,}" if isinstance(r['rate_list'], int) else r['rate_list']
         pkg = f"{r['pkg_display_val']:,}" if isinstance(r['pkg_display_val'], int) else r['pkg_display_val']
         
@@ -632,7 +620,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v66.1: Value Anchor)")
+st.title("📺 媒體 Cue 表生成器 (v66.2: Value Anchor Fix)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -775,6 +763,7 @@ if config:
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
                 
+                # 計算用 Net 320k (全省) vs 顯示用 List 分區價 (定錨)
                 if cfg["is_national"]:
                     calc_regs = ["全省"]
                     display_regs = REGIONS_ORDER # 展開6區
@@ -808,7 +797,7 @@ if config:
                     is_national_display = cfg["is_national"]
                     is_primary_pricing_row = (i == 0)
                     
-                    # 顯示邏輯：每列都顯示該區的 List Rate (Anchor)
+                    # 🌟 關鍵：顯示用區域 List (Value Anchor)
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     
