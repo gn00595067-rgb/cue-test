@@ -69,7 +69,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     return [
         f"1.請於 {d_str}前 回簽及進單，方可順利上檔。",
         "2.以上節目名稱如有異動，以上檔時節目名稱為主，如遇時段滿檔，上檔時間挪後或更換至同級時段。",
-        "3.通路店鋪數與開機率開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。",
+        "3.通路店鋪數與開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。",
         "4.託播方需於上檔前 5 個工作天，提供廣告帶(mp3)、影片/影像 1920x1080 (mp4)。",
         f"5.雙方同意費用請款月份 : {billing_month}，如有修正必要，將另行E-Mail告知，並視為正式合約之一部分。",
         f"6.付款兌現日期：{p_str}"
@@ -217,7 +217,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         cols_def = ["頻道", "播出地區", "播出店數", "播出時間", "秒數<br>規格", "專案價<br>(Net)"]
     th_fixed = "".join([f"<th rowspan='2' class='{header_cls}'>{c}</th>" for c in cols_def])
     
-    # 🌟 [Fix Key Error] media_type -> media
+    # 🌟 [Fix Key Error] 使用 "media"
     rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
     tbody = ""
     media_counts = {}
