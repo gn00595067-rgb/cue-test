@@ -33,7 +33,7 @@ def html_escape(s):
 # ==============================================================================
 # 🅰️ [模組 A：資料庫與設定]
 # ==============================================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.6")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.7")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -54,7 +54,7 @@ def load_default_template():
         except: pass
     return None, None
 
-# [補回] 區域顯示對照
+# 區域顯示對照
 REGION_DISPLAY_6 = {
     "北區": "北區-北北基", "桃竹苗": "桃區-桃竹苗", "中區": "中區-中彰投",
     "雲嘉南": "雲嘉南區-雲嘉南", "高屏": "高屏區-高屏", "東區": "東區-宜花東",
@@ -62,14 +62,14 @@ REGION_DISPLAY_6 = {
 }
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
 
-# [補回] 備註生成函式
+# 備註生成函式
 def get_remarks_text(sign_deadline, billing_month, payment_date):
     d_str = sign_deadline.strftime("%Y/%m/%d (%a) %H:%M") if sign_deadline else "____/__/__ (__) 12:00"
     p_str = payment_date.strftime("%Y/%m/%d") if payment_date else "____/__/__"
     return [
         f"1.請於 {d_str}前 回簽及進單，方可順利上檔。",
         "2.以上節目名稱如有異動，以上檔時節目名稱為主，如遇時段滿檔，上檔時間挪後或更換至同級時段。",
-        "3.通路店鋪數與開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。",
+        "3.通路店鋪數與開機率開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。",
         "4.託播方需於上檔前 5 個工作天，提供廣告帶(mp3)、影片/影像 1920x1080 (mp4)。",
         f"5.雙方同意費用請款月份 : {billing_month}，如有修正必要，將另行E-Mail告知，並視為正式合約之一部分。",
         f"6.付款兌現日期：{p_str}"
@@ -143,7 +143,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 for r in display_regs:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
-                    
                     if cfg["is_national"]:
                         if r == "北區": 
                             nat_list = db["全省"][0]
@@ -177,7 +176,7 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_price_accum, debug_logs
 
 # ==============================================================================
-# ☪️ [渲染引擎 - HTML/PDF/Excel] (GPT 復刻版)
+# ☪️ [HTML/PDF 渲染引擎]
 # ==============================================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
@@ -192,7 +191,6 @@ def load_font_base64():
     except: pass
     return None
 
-# HTML 生成 (用於預覽與 PDF)
 def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, total_list, grand_total, budget, prod):
     header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
@@ -212,21 +210,22 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         date_th2 += f"<th class='{bg} col_day'>{weekdays[wd]}</th>"
         curr += timedelta(days=1)
 
-    # 🌟 表頭：Rate(Net)
+    # 表頭：Rate(Net)
     if format_type == "Dongwu":
         cols_def = ["Station", "Location", "Program", "Day-part", "Size", "rate<br>(Net)", "Package-cost<br>(Net)"]
     else:
         cols_def = ["頻道", "播出地區", "播出店數", "播出時間", "秒數<br>規格", "專案價<br>(Net)"]
     th_fixed = "".join([f"<th rowspan='2' class='{header_cls}'>{c}</th>" for c in cols_def])
     
-    rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media_type"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
+    # 🌟 [Fix Key Error] media_type -> media
+    rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
     tbody = ""
     media_counts = {}
-    for r in rows_sorted: media_counts[r["media_type"]] = media_counts.get(r["media_type"], 0) + 1
+    for r in rows_sorted: media_counts[r["media"]] = media_counts.get(r["media"], 0) + 1
     media_printed = {m: False for m in media_counts}
 
     for idx, r in enumerate(rows_sorted):
-        m = r["media_type"]
+        m = r["media"]
         tbody += "<tr>"
         if not media_printed[m]:
             rowspan = media_counts[m]
@@ -298,7 +297,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     """
     return html_content
 
-# PDF 轉檔 (WeasyPrint)
 def html_to_pdf_weasyprint(html_str):
     try:
         from weasyprint import HTML, CSS
@@ -422,6 +420,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
 # ==============================================================================
 # 🇩 [UI & Main]
 # ==============================================================================
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.7")
 st.title("📺 媒體 Cue 表生成器")
 
 template_bytes, source_type = load_default_template()
@@ -549,6 +548,7 @@ if is_cf:
 
 if config:
     rows, total_list_accum, logs = calculate_plan_data(config, total_budget_input, days_count)
+    
     prod_cost = 10000
     vat = int(round((total_budget_input + prod_cost) * 0.05))
     grand_total = total_budget_input + prod_cost + vat
@@ -568,11 +568,11 @@ if config:
     # 2. 產生檔案
     if has_template and rows:
         try:
-            # Excel (XlsxWriter)
+            # Excel (使用 xlsxwriter)
             xlsx = generate_excel(rows, days_count, start_date, end_date, client_name, p_str, total_list_accum, grand_total, total_budget_input, prod_cost)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
             
-            # PDF (WeasyPrint HTML -> PDF)
+            # PDF (使用 WeasyPrint HTML -> PDF)
             pdf_bytes, err = html_to_pdf_weasyprint(html_preview)
             if pdf_bytes:
                 st.download_button("下載 PDF (Preview-Based)", pdf_bytes, f"Cue_{client_name}.pdf")
