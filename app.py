@@ -9,7 +9,7 @@ import subprocess
 import re
 import base64
 from datetime import timedelta, datetime, date
-import xlsxwriter
+import xlsxwriter  # 這是 GPT 版本核心需要的套件
 
 # =========================================================
 # 0. 基礎工具
@@ -30,9 +30,9 @@ def html_escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 # =========================================================
-# 1. 頁面設定 & 自動載入
+# 1. 頁面設定
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.0 (Final Data Sync)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.1 (Stable Release)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -59,7 +59,7 @@ def find_soffice_path():
     return None
 
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
-    # 優先嘗試 Windows Excel COM (最擬真)
+    # Windows Excel COM
     if os.name == "nt":
         try:
             import win32com.client
@@ -84,7 +84,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                     with open(pdf_path, "rb") as f: return f.read(), "Excel App (Local)", ""
         except: pass
 
-    # 其次嘗試 LibreOffice (Cloud/Mac/Linux)
+    # LibreOffice
     soffice = find_soffice_path()
     if soffice:
         try:
@@ -103,14 +103,14 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     return None, "Fail", "無可用的 Excel 轉檔引擎"
 
 # =========================================================
-# 3. 資料庫 (2026 新制 - 依據上傳檔案校正)
+# 3. 資料庫 (2026 修正版)
 # =========================================================
 STORE_COUNTS = {
     "全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", "雲嘉南": "499店", "高屏": "490店", "東區": "181店",
     "新鮮視_全省": "3,124面", "新鮮視_北區": "1,127面", "新鮮視_桃竹苗": "616面", "新鮮視_中區": "528面",
     "新鮮視_雲嘉南": "365面", "新鮮視_高屏": "405面", "新鮮視_東區": "83面",
-    "家樂福_量販": "68店", # [FIX] 校正為 68
-    "家樂福_超市": "249店" # [FIX] 校正為 249
+    "家樂福_量販": "68店", # 修正
+    "家樂福_超市": "249店" # 修正
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
@@ -179,7 +179,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     worksheet = workbook.add_worksheet("Media Schedule")
     
-    # 格式設定
+    # 格式
     fmt_title = workbook.add_format({'font_size': 18, 'bold': True, 'align': 'center', 'font_name': 'Arial'})
     fmt_header_left = workbook.add_format({'align': 'left', 'valign': 'top', 'bold': True, 'font_name': 'Arial', 'font_size': 10})
     fmt_col_header = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#4472C4', 'font_color': 'white', 'text_wrap': True, 'font_size': 10, 'font_name': 'Arial'})
@@ -211,7 +211,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
         worksheet.write(8, col_idx, weekdays[wd], fmt)
         curr += timedelta(days=1)
 
-    # 🌟 修正：表頭顯示 Net，但內容填 List (Value Anchor)
+    # 🌟 表頭：Rate(Net) 但填入 List 數值
     headers = ["Station", "Location", "Program", "Day-part", "Size", "rate\n(Net)", "Package-cost\n(Net)"]
     for i, h in enumerate(headers): worksheet.write(8, i, h, fmt_col_header)
     
@@ -247,7 +247,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
             worksheet.write(r_idx, 3, r_data['daypart'], fmt_cell)
             worksheet.write(r_idx, 4, f"{r_data['seconds']}秒", fmt_cell)
             
-            # Rate & Package (顯示 List Price)
+            # Rate & Package (顯示 List Price，價值定錨)
             worksheet.write(r_idx, 5, r_data['rate_list'], fmt_num)
             worksheet.write(r_idx, 6, r_data['pkg_display_val'], fmt_num)
 
@@ -260,12 +260,8 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
 
     worksheet.write(current_row, 2, "Total (List Price)", fmt_total)
     
-    # 這裡可以不加總 Rate，因為沒意義
-    worksheet.write(current_row, 5, "", fmt_total)
-    
-    # 🌟 這裡顯示的是全省打包價 (如果買全省)，或分區加總 (如果買分區)
+    # 🌟 Total 金額強制使用「全省優惠總價」(Value Anchor)
     worksheet.write(current_row, 6, total_list, fmt_total)
-    
     worksheet.write(current_row, last_col, sum(r['spots'] for r in rows), fmt_spots)
     
     current_row += 1
@@ -294,7 +290,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
 # =========================================================
 # 5. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v68.0: Final Corrected)")
+st.title("📺 媒體 Cue 表生成器 (v68.1: Stable)")
 
 has_template, source = load_default_template()
 if has_template:
@@ -330,12 +326,10 @@ with st.expander("📝 備註欄位設定 (Remarks)", expanded=False):
 
 st.markdown("### 3. 媒體投放設定")
 
-# 1. 狀態初始化
 if "rad_share" not in st.session_state: st.session_state.rad_share = 100
 if "fv_share" not in st.session_state: st.session_state.fv_share = 0
 if "cf_share" not in st.session_state: st.session_state.cf_share = 0
 
-# 2. 自動平衡 Callback
 def on_media_change():
     active = []
     if st.session_state.get("cb_rad"): active.append("rad_share")
@@ -368,7 +362,6 @@ def on_slider_change(changed_key):
             st.session_state[k1] = int(rem * ratio)
             st.session_state[k2] = rem - st.session_state[k1]
 
-# 3. 媒體勾選區
 st.write("請勾選要投放的媒體：")
 col_cb1, col_cb2, col_cb3 = st.columns(3)
 with col_cb1: is_rad = st.checkbox("全家廣播", value=True, key="cb_rad", on_change=on_media_change)
@@ -438,8 +431,6 @@ if config:
             
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
-                
-                # 計算用 (Net)
                 if cfg["is_national"]:
                     calc_regs = ["全省"]
                     display_regs = REGIONS_ORDER
@@ -450,7 +441,6 @@ if config:
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
-                
                 if unit_net_sum == 0: continue
                 
                 spots_init = math.ceil(s_budget / unit_net_sum)
@@ -469,21 +459,16 @@ if config:
                     "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"
                 })
                 
-                # 顯示用 (List)
                 for r in display_regs:
-                    # 每一列都顯示分區 List Price
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     
-                    # Total 累積邏輯 (Value Anchor)
                     if cfg["is_national"]:
-                        # 如果是全省聯播，Total 累積的是「全省定價」
-                        if r == "北區": # 只在北區這次迴圈加一次全省總價
+                        if r == "北區": # 全省優惠總價 (Total Override 來源)
                             nat_list = db["全省"][0]
                             nat_rate = int((nat_list / db["Std_Spots"]) * factor)
                             total_list_price_accum += nat_rate * spots_final
                     else:
-                        # 分區購買，直接累加分區價
                         total_list_price_accum += pkg_list
 
                     rows.append({
@@ -539,11 +524,12 @@ with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         st.markdown(f"**{log['media']} ({log['sec']}秒)**: 預算${log['budget']:,.0f} | 執行{log['spots']}檔 -> <span style='color:{color}'><b>{log['status']}</b></span>", unsafe_allow_html=True)
 
 if rows:
-    # 這裡的 HTML Preview 其實只給你看個大概，重點是下載的 Excel/PDF
-    # 為了節省篇幅，我把 HTML 生成邏輯跟 Excel 對齊了
-    
+    font_b64 = load_font_base64()
+    # 這裡顯示簡易預覽 (省略了複雜 HTML 生成邏輯，因為重點是下載的檔案)
     st.write("### 預覽 (與 Excel 輸出一致)")
-    if template_bytes:
+    st.dataframe(pd.DataFrame(rows)[['media', 'region', 'spots', 'rate_list', 'pkg_display_val']])
+
+    if has_template:
         try:
             xlsx = generate_excel(rows, days_count, start_date, end_date, client_name, p_str, total_list_price_accum, grand_total, total_budget_input, prod_cost)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
