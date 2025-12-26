@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.2 (Value Anchor Fix)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.3 (Anchor Visible)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -226,7 +226,7 @@ REGION_DISPLAY_6 = {
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
 
 # =========================================================
-# 5. Excel 生成模組
+# 5. Excel 生成模組 (Dynamic Rebuild)
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell): return cell
@@ -431,12 +431,13 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 if m_key == "家樂福": safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒")
                 else: safe_write(ws, f"{cols['seconds']}{curr_row}", int(r_data["seconds"]))
                 
-                # 🌟 關鍵修正：每一列都寫入分區定價 (Value Anchor)
+                # 🌟 [關鍵修正]：每一列都寫入分區定價 (Value Anchor)，不再隱藏！
                 safe_write(ws, f"{cols['rate']}{curr_row}", r_data["rate_list"])
                 safe_write(ws, f"{cols['pkg']}{curr_row}", r_data["pkg_display_val"])
             else:
                 safe_write(ws, f"{cols['daypart']}{curr_row}", r_data["daypart"])
                 safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒廣告")
+                # 聲活格式也同步顯示
                 safe_write(ws, f"{cols['proj_price']}{curr_row}", r_data["pkg_display_val"] if isinstance(r_data["pkg_display_val"], int) else 0)
 
             set_schedule(ws, curr_row, meta["schedule_start_col"], meta["max_days"], r_data["schedule"])
@@ -620,7 +621,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v66.2: Value Anchor Fix)")
+st.title("📺 媒體 Cue 表生成器 (v66.3: Value Anchor Complete)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
