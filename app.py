@@ -7,13 +7,13 @@ import shutil
 import tempfile
 import subprocess
 import re
-import base64
 import requests
+import base64
 from datetime import timedelta, datetime, date
 import xlsxwriter
 
 # ==============================================================================
-# 🛠️ [通用工具]
+# 🛠️ [通用工具模組]
 # ==============================================================================
 def parse_count_to_int(x):
     if x is None: return 0
@@ -31,9 +31,9 @@ def html_escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 # ==============================================================================
-# 🅰️ [設定與資料庫]
+# 🅰️ [模組 A：資料庫與設定]
 # ==============================================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.5 (GPT Format Restore)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.6")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -54,13 +54,26 @@ def load_default_template():
         except: pass
     return None, None
 
-# 補回顯示對照表
+# [補回] 區域顯示對照
 REGION_DISPLAY_6 = {
     "北區": "北區-北北基", "桃竹苗": "桃區-桃竹苗", "中區": "中區-中彰投",
     "雲嘉南": "雲嘉南區-雲嘉南", "高屏": "高屏區-高屏", "東區": "東區-宜花東",
     "全省量販": "全省量販", "全省超市": "全省超市",
 }
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
+
+# [補回] 備註生成函式
+def get_remarks_text(sign_deadline, billing_month, payment_date):
+    d_str = sign_deadline.strftime("%Y/%m/%d (%a) %H:%M") if sign_deadline else "____/__/__ (__) 12:00"
+    p_str = payment_date.strftime("%Y/%m/%d") if payment_date else "____/__/__"
+    return [
+        f"1.請於 {d_str}前 回簽及進單，方可順利上檔。",
+        "2.以上節目名稱如有異動，以上檔時節目名稱為主，如遇時段滿檔，上檔時間挪後或更換至同級時段。",
+        "3.通路店鋪數與開機率至少七成(以上)。每日因加盟數調整，或遇店舖年度季度改裝、設備維護升級及保修等狀況，會有一定幅度增減。",
+        "4.託播方需於上檔前 5 個工作天，提供廣告帶(mp3)、影片/影像 1920x1080 (mp4)。",
+        f"5.雙方同意費用請款月份 : {billing_month}，如有修正必要，將另行E-Mail告知，並視為正式合約之一部分。",
+        f"6.付款兌現日期：{p_str}"
+    ]
 
 # 資料庫 (2026)
 STORE_COUNTS = {"全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", "雲嘉南": "499店", "高屏": "490店", "東區": "181店", "新鮮視_全省": "3,124面", "新鮮視_北區": "1,127面", "新鮮視_桃竹苗": "616面", "新鮮視_中區": "528面", "新鮮視_雲嘉南": "365面", "新鮮視_高屏": "405面", "新鮮視_東區": "83面", "家樂福_量販": "68店", "家樂福_超市": "249店"}
@@ -79,7 +92,7 @@ SEC_FACTORS = {
 }
 
 # ==============================================================================
-# 🅱️ [計算邏輯] (Logic)
+# 🅱️ [核心計算引擎]
 # ==============================================================================
 def get_sec_factor(media_type, seconds): return SEC_FACTORS.get(media_type, {}).get(seconds, 1.0)
 
@@ -130,6 +143,7 @@ def calculate_plan_data(config, total_budget, days_count):
                 for r in display_regs:
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
+                    
                     if cfg["is_national"]:
                         if r == "北區": 
                             nat_list = db["全省"][0]
@@ -163,7 +177,7 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_price_accum, debug_logs
 
 # ==============================================================================
-# ☪️ [HTML/PDF 渲染引擎] (GPT 的 WeasyPrint 復刻)
+# ☪️ [渲染引擎 - HTML/PDF/Excel] (GPT 復刻版)
 # ==============================================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
@@ -178,6 +192,7 @@ def load_font_base64():
     except: pass
     return None
 
+# HTML 生成 (用於預覽與 PDF)
 def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, total_list, grand_total, budget, prod):
     header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
@@ -185,19 +200,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     
     font_b64 = load_font_base64()
     font_face = f"@font-face {{ font-family: 'NotoSansTC'; src: url(data:font/ttf;base64,{font_b64}) format('truetype'); }}" if font_b64 else ""
-
-    st.markdown(f"""<style>
-    .excel-table {{ width: 100%; border-collapse: collapse; min-width: 1200px; font-family: 'NotoSansTC', Arial, sans-serif; font-size: 11px; }}
-    .excel-table th, .excel-table td {{ border: 0.5px solid #666; padding: 3px; text-align: center; white-space: nowrap; height: 20px; }}
-    .bg-dw-head {{ background-color: #4472C4; color: white; font-weight: bold; }}
-    .bg-sh-head {{ background-color: #BDD7EE; color: black; font-weight: bold; }}
-    .bg-weekend {{ background-color: #FFD966; color: black; }}
-    .bg-total   {{ background-color: #E2EFDA; font-weight: bold; }}
-    .bg-grand   {{ background-color: #FFC107; font-weight: bold; }}
-    .left {{ text-align: left !important; padding-left: 5px; }}
-    .right {{ text-align: right !important; padding-right: 5px; }}
-    .remarks {{ margin-top: 10px; font-size: 12px; text-align: left; line-height: 1.4; white-space: pre-wrap; }}
-    </style>""", unsafe_allow_html=True)
 
     date_th1, date_th2 = "", ""
     curr = start_dt
@@ -261,7 +263,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 
     vat = int(round((budget + prod) * 0.05))
     
-    # Footer Info
     footer_rows = ""
     footer_rows += f"<tr><td colspan='6' class='right'>製作</td><td class='right'>{prod:,}</td><td colspan='{eff_days+1}'></td></tr>"
     footer_rows += f"<tr><td colspan='6' class='right'>專案優惠價 (Budget)</td><td class='right' style='color:red; font-weight:bold;'>{budget:,}</td><td colspan='{eff_days+1}'></td></tr>"
@@ -297,20 +298,130 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     """
     return html_content
 
+# PDF 轉檔 (WeasyPrint)
 def html_to_pdf_weasyprint(html_str):
     try:
         from weasyprint import HTML, CSS
-        # 設置 Landscape A4
         css = CSS(string="@page { size: A4 landscape; margin: 1cm; }")
         pdf_bytes = HTML(string=html_str).write_pdf(stylesheets=[css])
         return pdf_bytes, ""
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
+
+# Excel 生成 (XlsxWriter)
+def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_list, grand_total, budget, prod):
+    media_order_map = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
+    rows.sort(key=lambda x: (media_order_map.get(x['media'], 99), x['seconds'], REGIONS_ORDER.index(x['region']) if x['region'] in REGIONS_ORDER else 99))
+    used_media = sorted(list(set(r['media'] for r in rows)), key=lambda x: media_order_map.get(x, 99))
+    mediums = "、".join(used_media)
+    
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    worksheet = workbook.add_worksheet("Media Schedule")
+    
+    fmt_title = workbook.add_format({'font_size': 18, 'bold': True, 'align': 'center', 'font_name': 'Arial'})
+    fmt_header_left = workbook.add_format({'align': 'left', 'valign': 'top', 'bold': True, 'font_name': 'Arial', 'font_size': 10})
+    fmt_col_header = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#4472C4', 'font_color': 'white', 'text_wrap': True, 'font_size': 10, 'font_name': 'Arial'})
+    fmt_date_wk = workbook.add_format({'font_size': 9, 'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#4472C4', 'font_color': 'white', 'font_name': 'Arial'})
+    fmt_date_we = workbook.add_format({'font_size': 9, 'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFD966', 'font_name': 'Arial'}) 
+    fmt_cell = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 10, 'font_name': 'Arial'})
+    fmt_cell_left = workbook.add_format({'align': 'left', 'valign': 'vcenter', 'border': 1, 'font_size': 10, 'text_wrap': True, 'font_name': 'Arial'})
+    fmt_num = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'num_format': '#,##0', 'font_size': 10, 'font_name': 'Arial'})
+    fmt_spots = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bold': True, 'bg_color': '#FFF2CC', 'font_size': 10, 'font_name': 'Arial'})
+    fmt_total = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '#,##0', 'font_size': 10, 'font_name': 'Arial'})
+    fmt_discount = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True, 'font_color': 'red', 'num_format': '#,##0', 'font_size': 10, 'font_name': 'Arial'})
+    fmt_grand_total = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True, 'bg_color': '#FFC107', 'num_format': '#,##0', 'font_size': 10, 'font_name': 'Arial'})
+
+    worksheet.merge_range('A1:AJ1', "Media Schedule", fmt_title)
+    info = [("客戶名稱：", c_name), ("Product：", products), ("Period :", f"{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y. %m. %d')}"), ("Medium :", mediums)]
+    for i, (label, val) in enumerate(info):
+        worksheet.write(2+i, 0, label, fmt_header_left)
+        worksheet.write(2+i, 1, val, fmt_header_left)
+
+    worksheet.write(6, 6, f"{start_dt.month}月", fmt_cell)
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    curr = start_dt
+    for i in range(days_cnt):
+        col_idx = 7 + i
+        wd = curr.weekday()
+        fmt = fmt_date_we if wd >= 5 else fmt_date_wk
+        worksheet.write(7, col_idx, curr.day, fmt)
+        worksheet.write(8, col_idx, weekdays[wd], fmt)
+        curr += timedelta(days=1)
+
+    headers = ["Station", "Location", "Program", "Day-part", "Size", "rate\n(Net)", "Package-cost\n(Net)"]
+    for i, h in enumerate(headers): worksheet.write(8, i, h, fmt_col_header)
+    
+    last_col = 7 + days_cnt
+    worksheet.write(8, last_col, "檔次", fmt_col_header)
+
+    current_row = 9
+    i = 0
+    while i < len(rows):
+        row = rows[i]
+        j = i + 1
+        while j < len(rows) and rows[j]['media'] == row['media'] and rows[j]['seconds'] == row['seconds']: j += 1
+        group_size = j - i
+        
+        m_name = row['media']
+        if "全家廣播" in m_name: m_name = "全家便利商店\n通路廣播廣告"
+        if "新鮮視" in m_name: m_name = "全家便利商店\n新鮮視廣告"
+        
+        if group_size > 1:
+            worksheet.merge_range(current_row, 0, current_row + group_size - 1, 0, m_name, fmt_cell_left)
+        else:
+            worksheet.write(current_row, 0, m_name, fmt_cell_left)
+            
+        for k in range(group_size):
+            r_data = rows[i + k]
+            r_idx = current_row + k
+            loc_txt = region_display(r_data['region'])
+            if "北北基" in loc_txt and "廣播" in r_data['media']: loc_txt = "北區-北北基+東"
+            
+            worksheet.write(r_idx, 1, loc_txt, fmt_cell)
+            worksheet.write(r_idx, 2, r_data['program'], fmt_cell)
+            worksheet.write(r_idx, 3, r_data['daypart'], fmt_cell)
+            worksheet.write(r_idx, 4, f"{r_data['seconds']}秒", fmt_cell)
+            worksheet.write(r_idx, 5, r_data['rate_list'], fmt_num)
+            worksheet.write(r_idx, 6, r_data['pkg_display_val'], fmt_num)
+
+            for d_idx, s_val in enumerate(r_data['schedule']):
+                worksheet.write(r_idx, 7 + d_idx, s_val, fmt_cell)
+            worksheet.write(r_idx, last_col, r_data['spots'], fmt_spots)
+
+        current_row += group_size
+        i = j
+
+    worksheet.write(current_row, 2, "Total (List Price)", fmt_total)
+    worksheet.write(current_row, 5, "", fmt_total)
+    worksheet.write(current_row, 6, total_list, fmt_total)
+    worksheet.write(current_row, last_col, sum(r['spots'] for r in rows), fmt_spots)
+    
+    current_row += 1
+    worksheet.write(current_row, 6, "製作", fmt_cell)
+    worksheet.write(current_row, 7, prod, fmt_num)
+    current_row += 1
+    worksheet.write(current_row, 6, "專案優惠價 (Budget)", fmt_cell)
+    worksheet.write(current_row, 7, budget, fmt_discount)
+    current_row += 1
+    vat_val = int(round((budget + prod) * 0.05))
+    worksheet.write(current_row, 6, "5% VAT", fmt_cell)
+    worksheet.write(current_row, 7, vat_val, fmt_num)
+    current_row += 1
+    final_total = budget + prod + vat_val
+    worksheet.write(current_row, 6, "Grand Total", fmt_grand_total)
+    worksheet.write(current_row, 7, final_total, fmt_grand_total)
+
+    worksheet.set_column('A:A', 20)
+    worksheet.set_column('B:B', 15)
+    worksheet.set_column('C:E', 12)
+    worksheet.set_column('F:G', 12)
+    worksheet.set_column(7, last_col, 4)
+    workbook.close()
+    return output
 
 # ==============================================================================
 # 🇩 [UI & Main]
 # ==============================================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.5 (GPT Style)")
 st.title("📺 媒體 Cue 表生成器")
 
 template_bytes, source_type = load_default_template()
@@ -438,7 +549,6 @@ if is_cf:
 
 if config:
     rows, total_list_accum, logs = calculate_plan_data(config, total_budget_input, days_count)
-    
     prod_cost = 10000
     vat = int(round((total_budget_input + prod_cost) * 0.05))
     grand_total = total_budget_input + prod_cost + vat
@@ -458,11 +568,11 @@ if config:
     # 2. 產生檔案
     if has_template and rows:
         try:
-            # Excel (使用 xlsxwriter)
+            # Excel (XlsxWriter)
             xlsx = generate_excel(rows, days_count, start_date, end_date, client_name, p_str, total_list_accum, grand_total, total_budget_input, prod_cost)
             st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
             
-            # PDF (使用 WeasyPrint HTML -> PDF)
+            # PDF (WeasyPrint HTML -> PDF)
             pdf_bytes, err = html_to_pdf_weasyprint(html_preview)
             if pdf_bytes:
                 st.download_button("下載 PDF (Preview-Based)", pdf_bytes, f"Cue_{client_name}.pdf")
