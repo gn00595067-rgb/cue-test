@@ -66,13 +66,21 @@ def load_default_template():
     
     return None, None
 
+# [FIX] 補回遺失的區域顯示定義
+REGION_DISPLAY_6 = {
+    "北區": "北區-北北基", "桃竹苗": "桃區-桃竹苗", "中區": "中區-中彰投",
+    "雲嘉南": "雲嘉南區-雲嘉南", "高屏": "高屏區-高屏", "東區": "東區-宜花東",
+    "全省量販": "全省量販", "全省超市": "全省超市",
+}
+def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
+
 # 資料庫 (2026 新制)
 STORE_COUNTS = {
     "全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", "雲嘉南": "499店", "高屏": "490店", "東區": "181店",
     "新鮮視_全省": "3,124面", "新鮮視_北區": "1,127面", "新鮮視_桃竹苗": "616面", "新鮮視_中區": "528面",
     "新鮮視_雲嘉南": "365面", "新鮮視_高屏": "405面", "新鮮視_東區": "83面",
-    "家樂福_量販": "68店",  # [Fix]
-    "家樂福_超市": "249店" # [Fix]
+    "家樂福_量販": "68店",  
+    "家樂福_超市": "249店" 
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
@@ -166,9 +174,9 @@ def calculate_plan_data(config, total_budget, days_count):
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     
-                    # Total 累積邏輯：全省聯播時，Total 來自全省定價
+                    # 累積 Total (全省聯播時只加一次全省總價)
                     if cfg["is_national"]:
-                        if r == "北區": # 只加一次全省總價
+                        if r == "北區": 
                             nat_list = db["全省"][0]
                             nat_rate = int((nat_list / db["Std_Spots"]) * factor)
                             total_list_price_accum += nat_rate * spots_final
@@ -223,7 +231,7 @@ def calculate_plan_data(config, total_budget, days_count):
 # ☪️ [模組 C：渲染引擎] (Renderer - Excel & PDF)
 # ==============================================================================
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
-    """將 Excel bytes 轉為 PDF bytes (優先使用 Excel COM, 其次 LibreOffice)"""
+    """將 Excel bytes 轉為 PDF bytes"""
     # 1. Windows Excel COM
     if os.name == "nt":
         try:
@@ -392,7 +400,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
 # ==============================================================================
 # 🇩 [模組 D：前端介面] (Streamlit UI)
 # ==============================================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.3")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.4")
 st.title("📺 媒體 Cue 表生成器")
 
 template_bytes, source_type = load_default_template()
