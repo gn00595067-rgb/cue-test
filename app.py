@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.0 (Visual Fix)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.1 (Value Anchor)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -82,7 +82,6 @@ def find_soffice_path():
     return None
 
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
-    # 1. Windows Excel COM (最完美)
     if os.name == "nt":
         try:
             import win32com.client
@@ -110,7 +109,6 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                     with open(pdf_path, "rb") as f: return f.read(), "Excel App (Local)", ""
         except: pass
 
-    # 2. LibreOffice (Cloud 首選)
     soffice = find_soffice_path()
     if soffice:
         try:
@@ -138,14 +136,13 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
     return None, "Fail", "無可用的 Excel 轉檔引擎"
 
 # =========================================================
-# 3. WeasyPrint Fallback (如果 Excel 轉檔失敗才用這個)
+# 3. WeasyPrint Fallback
 # =========================================================
 def html_to_pdf_fallback(html_str, font_b64):
     try: 
         from weasyprint import HTML, CSS
         from weasyprint.text.fonts import FontConfiguration
         font_config = FontConfiguration()
-        # 這裡定義 PDF 專用的 CSS，確保它是橫向且有格線
         css_str = """
         @page { size: A4 landscape; margin: 0.5cm; }
         body { font-family: 'NotoSansTC', sans-serif !important; font-size: 8pt; }
@@ -167,7 +164,7 @@ def html_to_pdf_fallback(html_str, font_b64):
         return None, str(e)
 
 # =========================================================
-# 4. 資料庫
+# 4. 資料庫 (2026 核心)
 # =========================================================
 STORE_COUNTS_RAW = {
     "全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", "雲嘉南": "499店", "高屏": "490店", "東區": "181店",
@@ -348,12 +345,10 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     target_sheet = meta["sheet_name"]
     if target_sheet not in wb.sheetnames: raise ValueError(f"缺少分頁：{target_sheet}")
     
-    # 1. 刪除無關分頁
     for s in list(wb.sheetnames):
         if s != target_sheet: del wb[s]
     ws = wb[target_sheet]
 
-    # 2. Header
     hc = meta["header_cells"]
     if "client" in hc: safe_write(ws, hc["client"], client_name)
     if "product" in hc: safe_write(ws, hc["product"], product_display_str)
@@ -363,7 +358,6 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     safe_write(ws, meta["date_start_cell"], datetime(start_dt.year, start_dt.month, start_dt.day))
     for addr, text in meta.get("header_override", {}).items(): safe_write(ws, addr, text)
 
-    # 3. Anchors & Total
     total_cell = find_cell_exact(ws, meta["total_label"])
     if not total_cell: raise ValueError("找不到 Total")
     total_row_orig = total_cell[0]
@@ -374,7 +368,6 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         r0 = find_first_row_contains(ws, cols["station"], kw)
         if r0: sec_start[m_key] = r0
     
-    # 4. Clean & Rebuild Logic
     sec_order = sorted(sec_start.items(), key=lambda x: x[1], reverse=True)
     written_ranges = [] 
 
@@ -438,20 +431,13 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 if m_key == "家樂福": safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒")
                 else: safe_write(ws, f"{cols['seconds']}{curr_row}", int(r_data["seconds"]))
                 
-                # 🌟 [關鍵修正]：全省聯播時，只在第一列寫價格，其他列留白
-                if r_data.get("is_national_display") and not r_data.get("is_primary_pricing_row"):
-                    safe_write(ws, f"{cols['rate']}{curr_row}", "")
-                    safe_write(ws, f"{cols['pkg']}{curr_row}", "")
-                else:
-                    safe_write(ws, f"{cols['rate']}{curr_row}", r_data["rate_list"])
-                    safe_write(ws, f"{cols['pkg']}{curr_row}", r_data["pkg_display_val"])
+                # 🌟 [關鍵修正]：每一列都顯示分區定價 (Value Anchor)
+                safe_write(ws, f"{cols['rate']}{curr_row}", r_data["rate_list"])
+                safe_write(ws, f"{cols['pkg']}{curr_row}", r_data["pkg_display_val"])
             else:
                 safe_write(ws, f"{cols['daypart']}{curr_row}", r_data["daypart"])
                 safe_write(ws, f"{cols['seconds']}{curr_row}", f"{r_data['seconds']}秒廣告")
-                if r_data.get("is_national_display") and not r_data.get("is_primary_pricing_row"):
-                    safe_write(ws, f"{cols['proj_price']}{curr_row}", "")
-                else:
-                    safe_write(ws, f"{cols['proj_price']}{curr_row}", r_data["pkg_display_val"] if isinstance(r_data["pkg_display_val"], int) else 0)
+                safe_write(ws, f"{cols['proj_price']}{curr_row}", r_data["pkg_display_val"] if isinstance(r_data["pkg_display_val"], int) else 0)
 
             set_schedule(ws, curr_row, meta["schedule_start_col"], meta["max_days"], r_data["schedule"])
             spot_sum = sum(r_data["schedule"][:meta["max_days"]])
@@ -470,13 +456,39 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     set_schedule(ws, total_row, meta["schedule_start_col"], meta["max_days"], daily_sums)
     safe_write(ws, f"{meta['total_col']}{total_row}", sum(daily_sums))
     
-    # 總金額計算 (排除非主列)
+    # 🌟 [總金額覆蓋邏輯]：全省聯播時，Total 用 National Package Price
     total_pkg = 0
+    # 先計算家樂福的部分 (它沒有全省/分區之分，直接累加)
+    # 然後處理廣播/新鮮視：如果是全省聯播，直接加上全省總價
+    
+    # 為了簡化，我們重新掃描 Rows 來計算
+    # 這裡需要一個 flag 來避免重複計算全省的總價
+    processed_national_media = set()
+    
     for r in rows:
+        m = r["media_type"]
         val = r["pkg_display_val"] if isinstance(r["pkg_display_val"], int) else 0
+        
         if r.get("is_national_display"):
-            if r.get("is_primary_pricing_row"): total_pkg += val
-        else: total_pkg += val
+            if m not in processed_national_media:
+                # 找到對應的全省定價 (List)
+                # 從 r 裡面反推有點麻煩，直接從 PRICING_DB 拿最準
+                factor = SEC_FACTORS[m][r["seconds"]]
+                std = PRICING_DB[m]["Std_Spots"]
+                nat_list_price = PRICING_DB[m]["全省"][0] # 400k or 150k
+                
+                # 計算全省總價 = 單檔定價 * 總檔次
+                # 這裡的 "總檔次" 是 "全省檔次" (1766)，不是 6 區加總 (10596)
+                # rows 裡的 spots 已經是 1766
+                # Rate = 400k / 480 * Factor
+                # Total = Rate * 1766
+                nat_rate = int((nat_list_price / std) * factor)
+                nat_total = nat_rate * r["spots"]
+                
+                total_pkg += nat_total
+                processed_national_media.add(m)
+        else:
+            total_pkg += val
 
     pkg_col = cols.get("pkg") or cols.get("proj_price")
     safe_write(ws, f"{pkg_col}{total_row}", total_pkg)
@@ -529,7 +541,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
     eff_days = min(days_cnt, 31)
     
-    # 🌟 修復後的 CSS，加上 border-collapse 和明確的格線顏色
     st.markdown(f"""<style>
     .excel-container {{ overflow-x: auto; }}
     .excel-table {{ width: 100%; border-collapse: collapse; min-width: 1200px; font-family: Arial, sans-serif; font-size: 12px; }}
@@ -550,8 +561,8 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         wd = curr.weekday()
         bg = "bg-weekend" if (format_type == "Dongwu" and wd >= 5) else header_cls
         if format_type == "Shenghuo": bg = header_cls 
-        date_th1 += f"<th class='{bg}'>{curr.day}</th>"
-        date_th2 += f"<th class='{bg}'>{weekdays[wd]}</th>"
+        date_th1 += f"<th class='{bg} col_day'>{curr.day}</th>"
+        date_th2 += f"<th class='{bg} col_day'>{weekdays[wd]}</th>"
         curr += timedelta(days=1)
 
     if format_type == "Dongwu":
@@ -583,31 +594,33 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         sec_txt = f"{r['seconds']}秒" if format_type=="Dongwu" and m=="家樂福" else f"{r['seconds']}" if format_type=="Dongwu" else f"{r['seconds']}秒廣告"
         tbody += f"<td>{sec_txt}</td>"
         
-        # 顯示邏輯：全省聯播只顯示第一列價格
-        show_price = True
-        if r.get("is_national_display") and not r.get("is_primary_pricing_row"):
-            show_price = False
-            
+        # 顯示邏輯：全部顯示 (Value Anchor)
         rate = f"{r['rate_list']:,}" if isinstance(r['rate_list'], int) else r['rate_list']
         pkg = f"{r['pkg_display_val']:,}" if isinstance(r['pkg_display_val'], int) else r['pkg_display_val']
         
-        rate_html = rate if show_price else ""
-        pkg_html = pkg if show_price else ""
-        
-        if format_type == "Dongwu": tbody += f"<td class='right'>{rate_html}</td><td class='right'>{pkg_html}</td>"
-        else: tbody += f"<td class='right'>{pkg_html}</td>"
+        if format_type == "Dongwu": tbody += f"<td class='right'>{rate}</td><td class='right'>{pkg}</td>"
+        else: tbody += f"<td class='right'>{pkg}</td>"
         
         for d in r['schedule'][:eff_days]: tbody += f"<td>{d}</td>"
         tbody += f"<td class='bg-total'>{sum(r['schedule'])}</td></tr>"
 
     totals = [sum([r["schedule"][d] for r in rows if d < len(r["schedule"])]) for d in range(eff_days)]
     
+    # 總金額計算 (Total Override)
     total_pkg = 0
+    processed_national = set()
     for r in rows:
+        m = r["media_type"]
         val = r["pkg_display_val"] if isinstance(r["pkg_display_val"], int) else 0
         if r.get("is_national_display"):
-            if r.get("is_primary_pricing_row"): total_pkg += val
-        else: total_pkg += val
+            if m not in processed_national:
+                factor = SEC_FACTORS[m][r["seconds"]]
+                std = PRICING_DB[m]["Std_Spots"]
+                nat_list = PRICING_DB[m]["全省"][0]
+                total_pkg += int((nat_list / std) * factor) * r["spots"]
+                processed_national.add(m)
+        else:
+            total_pkg += val
             
     colspan = 5; empty_td = "<td></td>" if format_type == "Dongwu" else ""
     tfoot = f"<tr class='bg-total'><td colspan='{colspan}' class='left'>Total</td>{empty_td}<td class='right'>{total_pkg:,}</td>"
@@ -619,7 +632,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v66.0)")
+st.title("📺 媒體 Cue 表生成器 (v66.1: Value Anchor)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -762,7 +775,6 @@ if config:
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
                 
-                # 計算用 Net 320k (全省) vs 顯示用 List 400k (全省)
                 if cfg["is_national"]:
                     calc_regs = ["全省"]
                     display_regs = REGIONS_ORDER # 展開6區
@@ -796,12 +808,8 @@ if config:
                     is_national_display = cfg["is_national"]
                     is_primary_pricing_row = (i == 0)
                     
-                    if is_national_display:
-                        # 全省聯播：Rate 用全省 List ($400k) / 480
-                        rate_list = int((db["全省"][0] / db["Std_Spots"]) * factor)
-                    else:
-                        rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
-                    
+                    # 顯示邏輯：每列都顯示該區的 List Rate (Anchor)
+                    rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     
                     rows.append({
