@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v66.3 (Anchor Visible)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v67.0 (Value Anchor Final)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -176,6 +176,7 @@ STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS_RAW.items(
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
+# [List Price, Net Price]
 PRICING_DB = {
     "全家廣播": { "Std_Spots": 480, "Day_Part": "00:00-24:00", 
         "全省": [400000, 320000], 
@@ -226,7 +227,7 @@ REGION_DISPLAY_6 = {
 def region_display(region: str) -> str: return REGION_DISPLAY_6.get(region, region)
 
 # =========================================================
-# 5. Excel 生成模組 (Dynamic Rebuild)
+# 5. Excel 生成模組
 # =========================================================
 def _get_master_cell(ws, cell):
     if not isinstance(cell, MergedCell): return cell
