@@ -12,7 +12,7 @@ from datetime import timedelta, datetime, date
 import xlsxwriter
 
 # ==============================================================================
-# 🛠️ [通用工具] (Utilities) - 不太需要改動
+# 🛠️ [通用工具模組] (Utilities)
 # ==============================================================================
 def parse_count_to_int(x):
     if x is None: return 0
@@ -26,6 +26,7 @@ def safe_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name).strip()
 
 def find_soffice_path():
+    """尋找 LibreOffice 執行檔路徑"""
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice: return soffice
     if os.name == "nt":
@@ -39,23 +40,45 @@ def find_soffice_path():
 
 # ==============================================================================
 # 🅰️ [模組 A：資料庫與設定] (Database & Config)
-# ⚠️ 修改規則：只在價格調整、店數變動時修改此處。
 # ==============================================================================
+# 系統設定
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
 
+# 載入公版檔案
+@st.cache_resource(ttl=600)
+def load_default_template():
+    # 1. 優先嘗試 Google Drive
+    if GOOGLE_DRIVE_FILE_ID:
+        url = f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}"
+        try:
+            r = requests.get(url, timeout=20, allow_redirects=True)
+            if r.status_code == 200 and b"<!DOCTYPE html>" not in r.content[:500]:
+                return io.BytesIO(r.content), "雲端硬碟 (Google Drive)"
+        except: pass
+
+    # 2. 其次嘗試本地檔案
+    if os.path.exists(DEFAULT_FILENAME):
+        try:
+            with open(DEFAULT_FILENAME, "rb") as f:
+                return io.BytesIO(f.read()), "系統主機 (Local)"
+        except: pass
+    
+    return None, None
+
+# 資料庫 (2026 新制)
 STORE_COUNTS = {
     "全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", "雲嘉南": "499店", "高屏": "490店", "東區": "181店",
     "新鮮視_全省": "3,124面", "新鮮視_北區": "1,127面", "新鮮視_桃竹苗": "616面", "新鮮視_中區": "528面",
     "新鮮視_雲嘉南": "365面", "新鮮視_高屏": "405面", "新鮮視_東區": "83面",
-    "家樂福_量販": "68店", 
-    "家樂福_超市": "249店"
+    "家樂福_量販": "68店",  # [Fix]
+    "家樂福_超市": "249店" # [Fix]
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
-# [List Price (牌價), Net Price (實收底價)]
+# [List Price (牌價/顯示用), Net Price (實收/計算用)]
 PRICING_DB = {
     "全家廣播": { "Std_Spots": 480, "Day_Part": "00:00-24:00", 
         "全省": [400000, 320000], 
@@ -78,11 +101,11 @@ SEC_FACTORS = {
 
 # ==============================================================================
 # 🅱️ [模組 B：核心計算引擎] (Calculation Logic)
-# ⚠️ 修改規則：負責「預算分配」、「實收逆推」、「偶數排程」。不處理顯示金額。
 # ==============================================================================
 def get_sec_factor(media_type, seconds): return SEC_FACTORS.get(media_type, {}).get(seconds, 1.0)
 
 def calculate_schedule(total_spots, days):
+    """偶數排程演算法"""
     if days <= 0: return []
     if total_spots % 2 != 0: total_spots += 1
     half_spots = total_spots // 2
@@ -90,7 +113,8 @@ def calculate_schedule(total_spots, days):
     half_schedule = [base + (1 if i < rem else 0) for i in range(days)]
     return [x * 2 for x in half_schedule]
 
-def calculate_plan(config, total_budget, days_count):
+def calculate_plan_data(config, total_budget, days_count):
+    """計算所有媒體的投放數據"""
     rows = []
     total_list_price_accum = 0
     debug_logs = []
@@ -105,15 +129,15 @@ def calculate_plan(config, total_budget, days_count):
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
                 
-                # 關鍵邏輯：計算用 Net (全省or區域)，顯示用 List (全省or區域)
+                # 計算用 (Net) vs 顯示用 (List) 區域設定
                 if cfg["is_national"]:
-                    calc_regs = ["全省"]
-                    display_regs = REGIONS_ORDER
+                    calc_regs = ["全省"]        # 計算用全省 Net
+                    display_regs = REGIONS_ORDER # 顯示展開 6 區
                 else:
                     calc_regs = cfg["regions"]
                     display_regs = cfg["regions"]
                 
-                # 1. 實收逆推 (Net Calculation)
+                # 1. 實收逆推 (Net)
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -136,15 +160,15 @@ def calculate_plan(config, total_budget, days_count):
                     "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"
                 })
                 
-                # 2. 準備顯示資料 (List Preparation)
+                # 2. 準備顯示資料 (List - Value Anchor)
                 for r in display_regs:
-                    # 每一列都顯示分區牌價 (Value Anchor)
+                    # 每列顯示分區定價 (db[r][0])
                     rate_list = int((db[r][0] / db["Std_Spots"]) * factor)
                     pkg_list = rate_list * spots_final
                     
-                    # 累積 Total (全省聯播時只加一次全省總價)
+                    # Total 累積邏輯：全省聯播時，Total 來自全省定價
                     if cfg["is_national"]:
-                        if r == "北區": 
+                        if r == "北區": # 只加一次全省總價
                             nat_list = db["全省"][0]
                             nat_rate = int((nat_list / db["Std_Spots"]) * factor)
                             total_list_price_accum += nat_rate * spots_final
@@ -152,7 +176,8 @@ def calculate_plan(config, total_budget, days_count):
                         total_list_price_accum += pkg_list
 
                     rows.append({
-                        "media": m, "region": r, "location": f"{r.replace('區', '')}區-{r}",
+                        "media": m, "region": r, 
+                        "location": f"{r.replace('區', '')}區-{r}",
                         "program": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
                         "daypart": db["Day_Part"], "seconds": sec,
                         "spots": spots_final, "schedule": sch,
@@ -181,6 +206,7 @@ def calculate_plan(config, total_budget, days_count):
                     "reason": f"懲罰 x1.1" if penalty > 1 else "費率正常"
                 })
                 
+                # 家樂福顯示邏輯 (List)
                 rate_h = int((db["量販_全省"]["List"] / base_std) * factor)
                 pkg_h = rate_h * spots_final
                 total_list_price_accum += pkg_h
@@ -195,10 +221,10 @@ def calculate_plan(config, total_budget, days_count):
 
 # ==============================================================================
 # ☪️ [模組 C：渲染引擎] (Renderer - Excel & PDF)
-# ⚠️ 修改規則：負責「畫」出 Excel 和 PDF。字體、格線、Total 的強制覆蓋寫在這裡。
 # ==============================================================================
 def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
-    # (此處保留原有的 Windows COM / LibreOffice 雙引擎邏輯，為了節省篇幅省略重複代碼，請複製 v68.2 的完整函式)
+    """將 Excel bytes 轉為 PDF bytes (優先使用 Excel COM, 其次 LibreOffice)"""
+    # 1. Windows Excel COM
     if os.name == "nt":
         try:
             import win32com.client
@@ -223,6 +249,7 @@ def xlsx_bytes_to_pdf_bytes(xlsx_bytes: bytes):
                     with open(pdf_path, "rb") as f: return f.read(), "Excel App (Local)", ""
         except: pass
 
+    # 2. LibreOffice
     soffice = find_soffice_path()
     if soffice:
         try:
@@ -251,7 +278,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     worksheet = workbook.add_worksheet("Media Schedule")
     
-    # 格式定義 (省略部分重複代碼，請參考 v68.2)
+    # 格式定義
     fmt_title = workbook.add_format({'font_size': 18, 'bold': True, 'align': 'center', 'font_name': 'Arial'})
     fmt_header_left = workbook.add_format({'align': 'left', 'valign': 'top', 'bold': True, 'font_name': 'Arial', 'font_size': 10})
     fmt_col_header = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#4472C4', 'font_color': 'white', 'text_wrap': True, 'font_size': 10, 'font_name': 'Arial'})
@@ -265,8 +292,8 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
     fmt_discount = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True, 'font_color': 'red', 'num_format': '#,##0', 'font_size': 10, 'font_name': 'Arial'})
     fmt_grand_total = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True, 'bg_color': '#FFC107', 'num_format': '#,##0', 'font_size': 10, 'font_name': 'Arial'})
 
+    # 繪製表頭
     worksheet.merge_range('A1:AJ1', "Media Schedule", fmt_title)
-    
     info = [("客戶名稱：", c_name), ("Product：", products), ("Period :", f"{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y. %m. %d')}"), ("Medium :", mediums)]
     for i, (label, val) in enumerate(info):
         worksheet.write(2+i, 0, label, fmt_header_left)
@@ -283,7 +310,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
         worksheet.write(8, col_idx, weekdays[wd], fmt)
         curr += timedelta(days=1)
 
-    # 🌟 表頭文字：依客戶要求寫 Net
+    # 🌟 Header: 顯示 (Net) 但填 List 值
     headers = ["Station", "Location", "Program", "Day-part", "Size", "rate\n(Net)", "Package-cost\n(Net)"]
     for i, h in enumerate(headers): worksheet.write(8, i, h, fmt_col_header)
     
@@ -302,6 +329,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
         if "全家廣播" in m_name: m_name = "全家便利商店\n通路廣播廣告"
         if "新鮮視" in m_name: m_name = "全家便利商店\n新鮮視廣告"
         
+        # Merge Station Name
         if group_size > 1:
             worksheet.merge_range(current_row, 0, current_row + group_size - 1, 0, m_name, fmt_cell_left)
         else:
@@ -319,7 +347,7 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
             worksheet.write(r_idx, 3, r_data['daypart'], fmt_cell)
             worksheet.write(r_idx, 4, f"{r_data['seconds']}秒", fmt_cell)
             
-            # Rate & Package (顯示 List Price，價值定錨)
+            # Rate & Package: 顯示分區 List Price
             worksheet.write(r_idx, 5, r_data['rate_list'], fmt_num)
             worksheet.write(r_idx, 6, r_data['pkg_display_val'], fmt_num)
 
@@ -330,12 +358,14 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
         current_row += group_size
         i = j
 
+    # Total Row
     worksheet.write(current_row, 2, "Total (List Price)", fmt_total)
     worksheet.write(current_row, 5, "", fmt_total)
-    # 🌟 Total: 顯示全省優惠總價 (來自模組 B 的計算)
+    # 🌟 Total: 顯示全省優惠打包價 (Value Anchor Override)
     worksheet.write(current_row, 6, total_list, fmt_total)
     worksheet.write(current_row, last_col, sum(r['spots'] for r in rows), fmt_spots)
     
+    # Footer
     current_row += 1
     worksheet.write(current_row, 6, "製作", fmt_cell)
     worksheet.write(current_row, 7, prod, fmt_num)
@@ -361,15 +391,162 @@ def generate_excel(rows, days_cnt, start_dt, end_dt, c_name, products, total_lis
 
 # ==============================================================================
 # 🇩 [模組 D：前端介面] (Streamlit UI)
-# ⚠️ 修改規則：負責按鈕、輸入框、版面配置。不涉及計算。
 # ==============================================================================
-st.title("📺 媒體 Cue 表生成器 (v68.2 Modular)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v68.3")
+st.title("📺 媒體 Cue 表生成器")
 
-# (載入設定與 UI 程式碼，完全沿用 v68.2，為了簡潔省略重複部分)
-# ... 請使用 v68.2 的 UI 代碼填入此處 ...
-# (但在呼叫計算時，請使用 calculate_plan 函式)
+template_bytes, source_type = load_default_template()
+has_template = (template_bytes is not None)
 
-# 範例 UI 呼叫邏輯：
-# if rows:
-#     rows, total_list_price_accum, debug_logs = calculate_plan(config, total_budget_input, days_count)
-#     xlsx = generate_excel(...)
+if has_template:
+    st.success(f"✅ 已載入系統公版 ({source_type})")
+else:
+    st.warning("⚠️ 無法載入公版，請手動上傳")
+    tpl = st.file_uploader("上傳 Excel 模板", type=["xlsx"])
+    if tpl: 
+        with open(DEFAULT_FILENAME, "wb") as f: f.write(tpl.read())
+        st.experimental_rerun()
+
+st.markdown("### 1. 選擇格式")
+format_type = st.radio("", ["Dongwu", "Shenghuo"], horizontal=True, label_visibility="collapsed")
+
+st.markdown("### 2. 基本資料設定")
+c1, c2, c3 = st.columns(3)
+with c1: client_name = st.text_input("客戶名稱", "萬國通路")
+with c2: product_name = st.text_input("產品名稱", "統一布丁")
+with c3: total_budget_input = st.number_input("總預算 (未稅 Net)", value=1000000, step=10000)
+
+c4, c5 = st.columns(2)
+with c4: start_date = st.date_input("開始日", datetime(2026, 1, 1))
+with c5: end_date = st.date_input("結束日", datetime(2026, 1, 31))
+days_count = (end_date - start_date).days + 1
+st.info(f"📅 走期共 **{days_count}** 天")
+
+with st.expander("📝 備註欄位設定 (Remarks)", expanded=False):
+    rc1, rc2, rc3 = st.columns(3)
+    sign_deadline = rc1.date_input("回簽截止日", datetime.now() + timedelta(days=3))
+    billing_month = rc2.text_input("請款月份", "2026年2月")
+    payment_date = rc3.date_input("付款兌現日", datetime(2026, 3, 31))
+
+st.markdown("### 3. 媒體投放設定")
+
+if "rad_share" not in st.session_state: st.session_state.rad_share = 100
+if "fv_share" not in st.session_state: st.session_state.fv_share = 0
+if "cf_share" not in st.session_state: st.session_state.cf_share = 0
+
+def on_media_change():
+    active = []
+    if st.session_state.get("cb_rad"): active.append("rad_share")
+    if st.session_state.get("cb_fv"): active.append("fv_share")
+    if st.session_state.get("cb_cf"): active.append("cf_share")
+    if not active: return
+    share = 100 // len(active)
+    for key in active: st.session_state[key] = share
+    rem = 100 - sum([st.session_state[k] for k in active])
+    st.session_state[active[0]] += rem
+
+def on_slider_change(changed_key):
+    active = []
+    if st.session_state.get("cb_rad"): active.append("rad_share")
+    if st.session_state.get("cb_fv"): active.append("fv_share")
+    if st.session_state.get("cb_cf"): active.append("cf_share")
+    others = [k for k in active if k != changed_key]
+    if not others: st.session_state[changed_key] = 100
+    elif len(others) == 1:
+        val = st.session_state[changed_key]
+        st.session_state[others[0]] = max(0, 100 - val)
+    elif len(others) == 2:
+        val = st.session_state[changed_key]
+        rem = max(0, 100 - val)
+        k1, k2 = others[0], others[1]
+        sum_others = st.session_state[k1] + st.session_state[k2]
+        if sum_others == 0: st.session_state[k1] = rem // 2; st.session_state[k2] = rem - st.session_state[k1]
+        else:
+            ratio = st.session_state[k1] / sum_others
+            st.session_state[k1] = int(rem * ratio)
+            st.session_state[k2] = rem - st.session_state[k1]
+
+st.write("請勾選要投放的媒體：")
+col_cb1, col_cb2, col_cb3 = st.columns(3)
+with col_cb1: is_rad = st.checkbox("全家廣播", value=True, key="cb_rad", on_change=on_media_change)
+with col_cb2: is_fv = st.checkbox("新鮮視", value=False, key="cb_fv", on_change=on_media_change)
+with col_cb3: is_cf = st.checkbox("家樂福", value=False, key="cb_cf", on_change=on_media_change)
+
+m1, m2, m3 = st.columns(3)
+config = {}
+
+if is_rad:
+    with m1:
+        st.markdown("#### 📻 全家廣播")
+        is_nat = st.checkbox("全省聯播", True, key="rad_nat")
+        regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
+        secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
+        st.slider("預算 %", 0, 100, key="rad_share", on_change=on_slider_change, args=("rad_share",))
+        sec_shares = {}
+        if len(secs) > 1:
+            ls = 100
+            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"rs_{s}"); sec_shares[s] = v; ls -= v
+            sec_shares[sorted(secs)[-1]] = ls
+        elif secs: sec_shares[secs[0]] = 100
+        config["全家廣播"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.rad_share, "sec_shares": sec_shares}
+
+if is_fv:
+    with m2:
+        st.markdown("#### 📺 新鮮視")
+        is_nat = st.checkbox("全省聯播", False, key="fv_nat")
+        regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
+        secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
+        st.slider("預算 %", 0, 100, key="fv_share", on_change=on_slider_change, args=("fv_share",))
+        sec_shares = {}
+        if len(secs) > 1:
+            ls = 100
+            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"fs_{s}"); sec_shares[s] = v; ls -= v
+            sec_shares[sorted(secs)[-1]] = ls
+        elif secs: sec_shares[secs[0]] = 100
+        config["新鮮視"] = {"is_national": is_nat, "regions": regs, "seconds": sorted(secs), "share": st.session_state.fv_share, "sec_shares": sec_shares}
+
+if is_cf:
+    with m3:
+        st.markdown("#### 🛒 家樂福")
+        secs = st.multiselect("秒數", DURATIONS, [20], key="cf_sec")
+        st.slider("預算 %", 0, 100, key="cf_share", on_change=on_slider_change, args=("cf_share",))
+        sec_shares = {}
+        if len(secs) > 1:
+            ls = 100
+            for s in sorted(secs)[:-1]: v = st.slider(f"{s}秒 %", 0, ls, int(ls/2), key=f"cs_{s}"); sec_shares[s] = v; ls -= v
+            sec_shares[sorted(secs)[-1]] = ls
+        elif secs: sec_shares[secs[0]] = 100
+        config["家樂福"] = {"regions": ["全省"], "seconds": sorted(secs), "share": st.session_state.cf_share, "sec_shares": sec_shares}
+
+# 執行
+if config:
+    rows, total_list_accum, logs = calculate_plan_data(config, total_budget_input, days_count)
+    
+    # 簡易預覽
+    st.write("### 預覽 (與 Excel 輸出一致)")
+    st.dataframe(pd.DataFrame(rows)[['media', 'region', 'spots', 'rate_list', 'pkg_display_val']])
+    
+    # Debug Panel
+    with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
+        st.markdown("#### 1. 本次預算分配 (Waterfall)")
+        for log in logs:
+            color = "green" if log["status"] == "達標" else "red"
+            st.markdown(f"**{log['media']} ({log['sec']}秒)**: 預算${log['budget']:,.0f} | 執行{log['spots']}檔 -> <span style='color:{color}'><b>{log['status']}</b></span>", unsafe_allow_html=True)
+
+    # 產出
+    if has_template and rows:
+        try:
+            prod_cost = 10000
+            vat = int(round((total_budget_input + prod_cost) * 0.05))
+            grand_total = total_budget_input + prod_cost + vat
+            p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}"
+            
+            xlsx = generate_excel(rows, days_count, start_date, end_date, client_name, p_str, total_list_accum, grand_total, total_budget_input, prod_cost)
+            st.download_button("下載 Excel", xlsx, f"Cue_{client_name}.xlsx")
+            
+            pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx.getvalue())
+            if pdf_bytes:
+                st.download_button(f"下載 PDF ({method})", pdf_bytes, f"Cue_{client_name}.pdf")
+            else:
+                st.error(f"PDF 產出失敗: {err}")
+        except Exception as e: st.error(f"Excel 產出錯誤: {e}")
