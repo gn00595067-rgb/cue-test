@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.1")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.2")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -110,31 +110,28 @@ def html_to_pdf_weasyprint(html_str):
     except Exception as e: return None, str(e)
 
 # =========================================================
-# 3. 核心資料設定 (雲端 Google Sheet 版 - [FIXED])
+# 3. 核心資料設定 (雲端 Google Sheet 版)
 # =========================================================
-# 這是您提供的公開連結
 GSHEET_SHARE_URL = "https://docs.google.com/spreadsheets/d/1bzmG-N8XFsj8m3LUPqA8K70AcIqaK4Qhq1VPWcK0w_s/edit?usp=sharing"
 
-@st.cache_data(ttl=300) # 5分鐘快取
+@st.cache_data(ttl=300)
 def load_config_from_cloud(share_url):
     try:
-        # 解析 File ID
         match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)
         if not match: return None, None, None, None, "連結格式錯誤"
         file_id = match.group(1)
         
-        # 定義讀取函式 (使用 gviz API，支援指定 sheet name)
         def read_sheet(sheet_name):
             url = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
             return pd.read_csv(url)
 
-        # 1. 載入店數 (Stores)
+        # 1. Stores
         df_store = read_sheet("Stores")
         df_store.columns = [c.strip() for c in df_store.columns]
         store_counts = dict(zip(df_store['Key'], df_store['Display_Name']))
         store_counts_num = dict(zip(df_store['Key'], df_store['Count']))
 
-        # 2. 載入秒數係數 (Factors)
+        # 2. Factors
         df_fact = read_sheet("Factors")
         df_fact.columns = [c.strip() for c in df_fact.columns]
         sec_factors = {}
@@ -142,7 +139,7 @@ def load_config_from_cloud(share_url):
             if row['Media'] not in sec_factors: sec_factors[row['Media']] = {}
             sec_factors[row['Media']][int(row['Seconds'])] = float(row['Factor'])
 
-        # 3. 載入價格表 (Pricing DB) - [FIX] 家樂福特殊結構處理
+        # 3. Pricing
         df_price = read_sheet("Pricing")
         df_price.columns = [c.strip() for c in df_price.columns]
         pricing_db = {}
@@ -151,7 +148,6 @@ def load_config_from_cloud(share_url):
             m = row['Media']
             r = row['Region']
             
-            # 家樂福：需要保留每一列的 Std_Spots 和 Day_Part
             if m == "家樂福":
                 if m not in pricing_db: pricing_db[m] = {}
                 pricing_db[m][r] = {
@@ -160,15 +156,12 @@ def load_config_from_cloud(share_url):
                     "Std_Spots": int(row['Std_Spots']),
                     "Day_Part": row['Day_Part']
                 }
-            
-            # 廣播/新鮮視：Std_Spots 和 Day_Part 統一在媒體層級
             else:
                 if m not in pricing_db:
                     pricing_db[m] = {
                         "Std_Spots": int(row['Std_Spots']),
                         "Day_Part": row['Day_Part']
                     }
-                # 寫入分區價格 [List, Net]
                 pricing_db[m][r] = [int(row['List_Price']), int(row['Net_Price'])]
             
         return store_counts, store_counts_num, pricing_db, sec_factors, None
@@ -176,15 +169,13 @@ def load_config_from_cloud(share_url):
     except Exception as e:
         return None, None, None, None, f"讀取失敗: {str(e)}"
 
-# 執行讀取
 with st.spinner("正在連線 Google Sheet 載入最新價格表..."):
     STORE_COUNTS, STORE_COUNTS_NUM, PRICING_DB, SEC_FACTORS, err_msg = load_config_from_cloud(GSHEET_SHARE_URL)
 
 if err_msg:
-    st.error(f"❌ 設定檔載入失敗！\n\n原因: {err_msg}\n\n請確認 Google Sheet 分頁名稱 ('Pricing', 'Stores', 'Factors') 與權限。")
+    st.error(f"❌ 設定檔載入失敗: {err_msg}")
     st.stop()
 
-# 固定的區域順序與秒數清單
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
@@ -239,7 +230,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
-                # --- Step 1: Net 算檔次 ---
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -275,7 +265,6 @@ def calculate_plan_data(config, total_budget, days_count):
 
                 sch = calculate_schedule(spots_final, days_count)
 
-                # 計算全省打包總價 (用於合併)
                 nat_pkg_display = 0
                 if cfg["is_national"]:
                     nat_list = db["全省"][0]
@@ -283,10 +272,8 @@ def calculate_plan_data(config, total_budget, days_count):
                     nat_pkg_display = nat_unit_price * spots_final
                     total_list_accum += nat_pkg_display
 
-                # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
-                    # 分區顯示總價 (Rate = Unit * Spots)
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
                     total_rate_display = unit_rate_display * spots_final 
                     
@@ -307,7 +294,6 @@ def calculate_plan_data(config, total_budget, days_count):
 
             elif m == "家樂福":
                 db = PRICING_DB["家樂福"]
-                # [FIX] 使用字典式讀取
                 base_std = db["量販_全省"]["Std_Spots"]
                 unit_net = (db["量販_全省"]["Net"] / base_std) * factor
                 
@@ -342,13 +328,15 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_accum, debug_logs
 
 # =========================================================
-# 5. OpenPyXL 渲染引擎 (含合併儲存格邏輯)
+# 5. OpenPyXL 渲染引擎 (修復版)
 # =========================================================
 SHEET_META = {
     "Dongwu": {
         "sheet_name": "東吳-格式", "date_start_cell": "I7", "schedule_start_col": "I", "max_days": 31, "total_col": "AN",
         "anchors": {"全家廣播": "通路廣播廣告", "新鮮視": "新鮮視廣告", "家樂福": "家樂福"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "rate": "G", "pkg": "H"},
+        # [FIXED] 補回遺失的 header_cells
+        "header_cells": {"client": "C3", "product": "C4", "period": "C5", "medium": "C6", "month": "I6"},
         "header_override": {"G7": "rate\n(Net)", "H7": "Package-cost\n(Net)"},
         "station_merge": True, "total_label": "Total",
         "footer_labels": {"make": "製作", "vat": "5% VAT", "grand": "Grand Total"},
@@ -656,7 +644,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
     tbody = ""
     
-    # Grouping for HTML merging
     grouped_rows = {}
     for r in rows_sorted:
         key = (r['media'], r['seconds'])
@@ -668,8 +655,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
         
         for k, r_data in enumerate(group):
             tbody += "<tr>"
-            
-            # Media Name Merging
             if k == 0:
                 display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
                 if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
@@ -697,7 +682,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
                 else:
                     tbody += f"<td class='right'>{pkg}</td>"
             else: 
-                # Shenghuo
                 if is_nat:
                     if k == 0:
                         nat_pkg = f"{r_data['nat_pkg_display']:,}"
@@ -753,7 +737,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v75.1)")
+st.title("📺 媒體 Cue 表生成器 (v75.2)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
