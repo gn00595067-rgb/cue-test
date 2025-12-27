@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.3")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.4")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -164,7 +164,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.2 - 合併儲存格數據準備)
+# 4. 核心計算函式 (Logic v4.3 - Fixed KeyError & Merge Logic)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -179,7 +179,6 @@ def calculate_plan_data(config, total_budget, days_count):
             if s_budget <= 0: continue
             
             factor = get_sec_factor(m, sec)
-            log_details = {}
             
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
@@ -210,23 +209,22 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
-                log_details = {
+                debug_logs.append({
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
                     "Formula": f"Net總和(${sum([db[r][1] for r in calc_regs]):,}) / {db['Std_Spots']} * {factor}",
-                    "Init_Spots": f"{spots_init} (Std: {db['Std_Spots']})",
+                    "Net_Unit": f"${unit_net_sum:.2f}",
                     "Penalty": f"x{calc_penalty} ({status_msg})",
+                    "Final_Cost": f"${unit_net_sum * calc_penalty:.2f}",
                     "Final_Spots": spots_final
-                }
-                debug_logs.append(log_details)
+                })
 
                 sch = calculate_schedule(spots_final, days_count)
 
-                # 計算全省打包價 (用於合併儲存格)
+                # 計算全省打包總價 (用於合併)
                 nat_pkg_display = 0
                 if cfg["is_national"]:
                     nat_list = db["全省"][0]
-                    # 全省打包價使用 Total Penalty (若沒達標要 x1.1)
                     nat_unit_price = int((nat_list / db["Std_Spots"]) * factor * total_display_penalty)
                     nat_pkg_display = nat_unit_price * spots_final
                     total_list_accum += nat_pkg_display
@@ -234,13 +232,9 @@ def calculate_plan_data(config, total_budget, days_count):
                 # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
-                    # 分區顯示總價 (Unit * Spots)
+                    # 分區顯示總價 (Rate = Unit * Spots)
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
                     total_rate_display = unit_rate_display * spots_final 
-                    
-                    # Package Cost 邏輯：
-                    # 若是全省 -> 稍後會在 Excel 階段做 Merge，這裡只要標記它是 member 即可
-                    # 若是分區 -> 直接顯示該區總價
                     
                     row_pkg_display = total_rate_display
                     if not cfg["is_national"]:
@@ -254,7 +248,7 @@ def calculate_plan_data(config, total_budget, days_count):
                         "rate_display": total_rate_display, 
                         "pkg_display": row_pkg_display,
                         "is_pkg_member": cfg["is_national"],
-                        "nat_pkg_display": nat_pkg_display # 傳遞給 Excel 做合併用
+                        "nat_pkg_display": nat_pkg_display
                     })
 
             elif m == "家樂福":
@@ -269,15 +263,15 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
-                log_details = {
+                debug_logs.append({
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
                     "Formula": f"Net(${db['量販_全省']['Net']:,}) / {base_std} * {factor}",
-                    "Init_Spots": f"{spots_init} (Std: {base_std})",
+                    "Net_Unit": f"${unit_net:.2f}",
                     "Penalty": f"x{penalty}",
+                    "Final_Cost": f"${unit_net * penalty:.2f}",
                     "Final_Spots": spots_final
-                }
-                debug_logs.append(log_details)
+                })
                 
                 base_list = db["量販_全省"]["List"]
                 unit_rate_h = int((base_list / base_std) * factor * penalty)
@@ -487,14 +481,13 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
             top_cell.value = station_title(m_key)
             apply_center_style(top_cell)
 
-        # [NEW] 處理 Package Cost 的合併顯示 (僅限全省)
+        # [NEW] 合併 Package Cost (全省打包時)
         if needed > 0 and data[0].get("is_pkg_member", False):
             pkg_col = cols.get("pkg")
             if pkg_col:
                 unmerge_col_overlap(ws, pkg_col, curr_row, curr_row + needed - 1)
-                merge_pkg_rng = f"{pkg_col}{curr_row}:{pkg_col}{curr_row + needed - 1}"
-                ws.merge_cells(merge_pkg_rng)
-                # 寫入全省打包價到第一個儲存格
+                merge_pkg = f"{pkg_col}{curr_row}:{pkg_col}{curr_row + needed - 1}"
+                ws.merge_cells(merge_pkg)
                 safe_write(ws, f"{pkg_col}{curr_row}", data[0]["nat_pkg_display"])
                 apply_center_style(ws[f"{pkg_col}{curr_row}"])
 
@@ -514,16 +507,14 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 else: safe_write(ws, curr_row, cols["seconds"], int(r_data["seconds"]))
                 
                 safe_write(ws, curr_row, cols["rate"], r_data["rate_display"])
-                # 若不是全省打包，則逐行寫入 Package Cost
+                # 若非全省，逐行寫入 Package Cost
                 if not r_data.get("is_pkg_member", False):
                     safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
             else:
                 safe_write(ws, curr_row, cols["daypart"], r_data["daypart"])
                 safe_write(ws, curr_row, cols["seconds"], f"{r_data['seconds']}秒廣告")
-                # Shenghuo 只有 pkg 欄位
-                if "pkg" in cols:
-                    if not r_data.get("is_pkg_member", False):
-                        safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
+                if "pkg" in cols and not r_data.get("is_pkg_member", False):
+                    safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
 
             set_schedule(ws, curr_row, meta["schedule_start_col"], meta["max_days"], r_data["schedule"])
             spot_sum = sum(r_data["schedule"][:meta["max_days"]])
@@ -568,7 +559,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 6. HTML Preview
+# 6. HTML Preview (含合併儲存格邏輯)
 # =========================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
@@ -610,15 +601,11 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     
     rows_sorted = sorted(rows, key=lambda x: (media_order.get(x["media"], 99), x["seconds"], REGIONS_ORDER.index(x["region"]) if x["region"] in REGIONS_ORDER else 99))
     tbody = ""
-    media_counts = {}
-    for r in rows_sorted: media_counts[r["media"]] = media_counts.get(r["media"], 0) + 1
-    media_printed = {m: False for m in media_counts}
-
-    # HTML 預覽的合併邏輯
-    # 這裡比較複雜，我們需要先分組
+    
+    # Grouping for HTML merging
     grouped_rows = {}
     for r in rows_sorted:
-        key = (r['media'], r['seconds']) # 同媒體同秒數視為一組
+        key = (r['media'], r['seconds'])
         grouped_rows.setdefault(key, []).append(r)
 
     for (m, sec), group in grouped_rows.items():
@@ -649,7 +636,6 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
             
             if format_type == "Dongwu": 
                 tbody += f"<td class='right'>{rate}</td>"
-                # Package Cost Merging
                 if is_nat:
                     if k == 0:
                         nat_pkg = f"{r_data['nat_pkg_display']:,}"
@@ -657,7 +643,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
                 else:
                     tbody += f"<td class='right'>{pkg}</td>"
             else: 
-                # Shenghuo only has pkg col
+                # Shenghuo
                 if is_nat:
                     if k == 0:
                         nat_pkg = f"{r_data['nat_pkg_display']:,}"
@@ -713,7 +699,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v74.3)")
+st.title("📺 媒體 Cue 表生成器 (v74.4)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -874,11 +860,11 @@ if config:
     with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         st.markdown("#### 1. 本次預算分配詳細運算")
         for log in logs:
-            st.markdown(f"**{log['Media']}**")
-            st.markdown(f"- 預算: {log['Budget']}")
-            st.markdown(f"- 公式: {log['Formula']}")
-            st.markdown(f"- 原始單價: {log['Net_Unit']} | 懲罰: {log['Penalty']}")
-            st.markdown(f"- 最終單價: {log['Final_Cost']} | 執行檔次: **{log['Final_Spots']}**")
+            st.markdown(f"**{log.get('Media', 'N/A')}**")
+            st.markdown(f"- 預算: {log.get('Budget', 'N/A')}")
+            st.markdown(f"- 公式: {log.get('Formula', 'N/A')}")
+            st.markdown(f"- 原始單價: {log.get('Net_Unit', 'N/A')} | 懲罰: {log.get('Penalty', 'N/A')}")
+            st.markdown(f"- 最終單價: {log.get('Final_Cost', 'N/A')} | 執行檔次: **{log.get('Final_Spots', 'N/A')}**")
             st.divider()
 
     # 2. 產生檔案
