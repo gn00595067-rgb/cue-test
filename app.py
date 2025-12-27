@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.0")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.1")
 
 # =========================================================
 # 2. PDF 策略
@@ -121,11 +121,9 @@ def load_config_from_cloud(share_url):
         df_price = read_sheet("Pricing")
         df_price.columns = [c.strip() for c in df_price.columns]
         pricing_db = {}
-        
         for _, row in df_price.iterrows():
             m = row['Media']
             r = row['Region']
-            
             if m == "家樂福":
                 if m not in pricing_db: pricing_db[m] = {}
                 pricing_db[m][r] = {
@@ -136,10 +134,7 @@ def load_config_from_cloud(share_url):
                 }
             else:
                 if m not in pricing_db:
-                    pricing_db[m] = {
-                        "Std_Spots": int(row['Std_Spots']),
-                        "Day_Part": row['Day_Part']
-                    }
+                    pricing_db[m] = {"Std_Spots": int(row['Std_Spots']), "Day_Part": row['Day_Part']}
                 pricing_db[m][r] = [int(row['List_Price']), int(row['Net_Price'])]
             
         return store_counts, store_counts_num, pricing_db, sec_factors, None
@@ -425,7 +420,6 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     target_sheet = wb.sheetnames[0] 
     ws = wb[target_sheet]
 
-    # Header
     hc = meta["header_cells"]
     if "client" in hc: safe_write_addr(ws, hc["client"], client_name)
     if "product" in hc: safe_write_addr(ws, hc["product"], product_display_str)
@@ -437,7 +431,6 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     for addr, text in meta.get("header_override", {}).items(): 
         safe_write_addr(ws, addr, text)
 
-    # Content
     cols = meta["cols"]
     total_cell = find_row_by_content(ws, cols["station"], meta["total_label"])
     if not total_cell: return None
@@ -563,8 +556,21 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 6. HTML Preview (Generated)
+# 6. HTML Preview (Fixed: Missing function added)
 # =========================================================
+def load_font_base64():
+    font_path = "NotoSansTC-Regular.ttf"
+    if os.path.exists(font_path):
+        with open(font_path, "rb") as f: return base64.b64encode(f.read()).decode("utf-8")
+    url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTF/TraditionalChinese/NotoSansTC-Regular.ttf"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            with open(font_path, "wb") as f: f.write(r.content)
+            return base64.b64encode(r.content).decode("utf-8")
+    except: pass
+    return None
+
 def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, total_list, grand_total, budget, prod):
     header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
@@ -687,13 +693,12 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v76.0)")
+st.title("📺 媒體 Cue 表生成器 (v76.1)")
 
 st.markdown("### 1. 選擇格式")
 c1, c2 = st.columns(2)
 format_type = c1.radio("", ["Dongwu", "Shenghuo"], horizontal=True)
 
-# 雙模版上傳
 tpl_file = None
 if format_type == "Dongwu":
     tpl_file = c2.file_uploader("上傳【東吳】樣板 (.xlsx)", type=["xlsx"], key="upl_dw")
@@ -851,16 +856,14 @@ if config:
     p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}"
     rem = get_remarks_text(sign_deadline, billing_month, payment_date)
 
-    # HTML Preview
     html_preview = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, total_list_accum, grand_total, total_budget_input, prod_cost)
     st.components.v1.html(html_preview, height=700, scrolling=True)
 
     with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         for log in logs:
-            st.markdown(f"**{log.get('Media')}** - 預算: {log.get('Budget')} | 公式: {log.get('Formula')} | 執行: **{log.get('Final_Spots')}**檔")
+            st.markdown(f"**{log.get('Media', 'N/A')}** - 公式: {log.get('Formula', 'N/A')}")
             st.divider()
 
-    # Excel / PDF Download
     if template_bytes and rows:
         try:
             xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes, total_list_accum)
