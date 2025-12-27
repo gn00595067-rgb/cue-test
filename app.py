@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.4")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.5")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -164,7 +164,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.3 - Fixed KeyError & Merge Logic)
+# 4. 核心計算函式 (Logic v4.4 - Auto-National Promotion)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -179,6 +179,7 @@ def calculate_plan_data(config, total_budget, days_count):
             if s_budget <= 0: continue
             
             factor = get_sec_factor(m, sec)
+            log_details = {}
             
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
@@ -209,6 +210,7 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
+                # [FIX] 使用 .get 避免 KeyError
                 debug_logs.append({
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -263,6 +265,7 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
+                # [FIX] Log
                 debug_logs.append({
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -559,7 +562,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 6. HTML Preview (含合併儲存格邏輯)
+# 6. HTML Preview
 # =========================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
@@ -785,6 +788,14 @@ if is_rad:
         st.markdown("#### 📻 全家廣播")
         is_nat = st.checkbox("全省聯播", True, key="rad_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
+        
+        # [NEW] 自動判斷全省邏輯 (Auto-Upgrade)
+        effective_is_nat = is_nat
+        if not is_nat and len(regs) == 6:
+            effective_is_nat = True
+            regs = ["全省"] # 運算用
+            st.info("✅ 已選滿6區，自動轉為全省聯播計價")
+
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
         st.slider("預算 %", 0, 100, key="rad_share", on_change=on_slider_change, args=("rad_share",))
         sec_shares = {}
@@ -800,13 +811,20 @@ if is_rad:
                     sec_shares[s] = rem
                     st.markdown(f"🔹 **{s}秒**: {rem}% (自動計算)")
         elif secs: sec_shares[secs[0]] = 100
-        config["全家廣播"] = {"is_national": is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.rad_share}
+        config["全家廣播"] = {"is_national": effective_is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.rad_share}
 
 if is_fv:
     with m2:
         st.markdown("#### 📺 新鮮視")
         is_nat = st.checkbox("全省聯播", False, key="fv_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
+        
+        effective_is_nat = is_nat
+        if not is_nat and len(regs) == 6:
+            effective_is_nat = True
+            regs = ["全省"]
+            st.info("✅ 已選滿6區，自動轉為全省聯播計價")
+
         secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
         st.slider("預算 %", 0, 100, key="fv_share", on_change=on_slider_change, args=("fv_share",))
         sec_shares = {}
@@ -822,7 +840,7 @@ if is_fv:
                     sec_shares[s] = rem
                     st.markdown(f"🔹 **{s}秒**: {rem}% (自動計算)")
         elif secs: sec_shares[secs[0]] = 100
-        config["新鮮視"] = {"is_national": is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.fv_share}
+        config["新鮮視"] = {"is_national": effective_is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.fv_share}
 
 if is_cf:
     with m3:
