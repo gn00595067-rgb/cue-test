@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.2")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.3")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -121,7 +121,6 @@ STORE_COUNTS = {
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
 
-# [List Price (顯示用), Net Price (運算用)]
 PRICING_DB = {
     "全家廣播": { "Std_Spots": 480, "Day_Part": "00:00-24:00", "全省": [400000, 320000], "北區": [250000, 200000], "桃竹苗": [150000, 120000], "中區": [150000, 120000], "雲嘉南": [100000, 80000], "高屏": [100000, 80000], "東區": [62500, 50000] },
     "新鮮視": { "Std_Spots": 504, "Day_Part": "07:00-22:00", "全省": [150000, 120000], "北區": [150000, 120000], "桃竹苗": [120000, 96000], "中區": [90000, 72000], "雲嘉南": [75000, 60000], "高屏": [75000, 60000], "東區": [45000, 36000] },
@@ -133,7 +132,6 @@ SEC_FACTORS = {
     "家樂福": {30: 1.5, 20: 1.0, 15: 0.85, 10: 0.65, 5: 0.35}
 }
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
-# [FIX] 補回 DURATIONS 定義
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
 REGION_DISPLAY_MAP = {
@@ -166,7 +164,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.1 - Detailed Debug)
+# 4. 核心計算函式 (Logic v4.2 - 合併儲存格數據準備)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -188,14 +186,14 @@ def calculate_plan_data(config, total_budget, days_count):
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
+                # --- Step 1: Net 算檔次 ---
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
                 if unit_net_sum == 0: continue
                 
                 spots_init = math.ceil(s_budget / unit_net_sum)
-                std_spots = db["Std_Spots"]
-                is_under_target = spots_init < std_spots
+                is_under_target = spots_init < db["Std_Spots"]
                 
                 calc_penalty = 1.1 if is_under_target else 1.0 
                 
@@ -215,32 +213,38 @@ def calculate_plan_data(config, total_budget, days_count):
                 log_details = {
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
-                    "Formula": f"Net總和(${sum([db[r][1] for r in calc_regs]):,}) / {std_spots} * {factor}",
-                    "Net_Unit": f"${unit_net_sum:.2f}",
-                    "Init_Spots": f"{spots_init} (Std: {std_spots})",
+                    "Formula": f"Net總和(${sum([db[r][1] for r in calc_regs]):,}) / {db['Std_Spots']} * {factor}",
+                    "Init_Spots": f"{spots_init} (Std: {db['Std_Spots']})",
                     "Penalty": f"x{calc_penalty} ({status_msg})",
-                    "Final_Cost": f"${unit_net_sum * calc_penalty:.2f}",
                     "Final_Spots": spots_final
                 }
                 debug_logs.append(log_details)
 
                 sch = calculate_schedule(spots_final, days_count)
 
+                # 計算全省打包價 (用於合併儲存格)
+                nat_pkg_display = 0
+                if cfg["is_national"]:
+                    nat_list = db["全省"][0]
+                    # 全省打包價使用 Total Penalty (若沒達標要 x1.1)
+                    nat_unit_price = int((nat_list / db["Std_Spots"]) * factor * total_display_penalty)
+                    nat_pkg_display = nat_unit_price * spots_final
+                    total_list_accum += nat_pkg_display
+
+                # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
-                    # Rate 顯示分區「總價」
+                    # 分區顯示總價 (Unit * Spots)
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
                     total_rate_display = unit_rate_display * spots_final 
-                    pkg_display = total_rate_display
                     
-                    if cfg["is_national"]:
-                        # 全省 Total 計算
-                        if i == 0:
-                            nat_list = db["全省"][0]
-                            nat_unit = int((nat_list / db["Std_Spots"]) * factor * total_display_penalty)
-                            total_list_accum += nat_unit * spots_final
-                    else:
-                        total_list_accum += pkg_display
+                    # Package Cost 邏輯：
+                    # 若是全省 -> 稍後會在 Excel 階段做 Merge，這裡只要標記它是 member 即可
+                    # 若是分區 -> 直接顯示該區總價
+                    
+                    row_pkg_display = total_rate_display
+                    if not cfg["is_national"]:
+                        total_list_accum += row_pkg_display
 
                     rows.append({
                         "media": m, "region": r,
@@ -248,8 +252,9 @@ def calculate_plan_data(config, total_budget, days_count):
                         "daypart": db["Day_Part"], "seconds": sec,
                         "spots": spots_final, "schedule": sch,
                         "rate_display": total_rate_display, 
-                        "pkg_display": pkg_display,
-                        "is_pkg_member": cfg["is_national"]
+                        "pkg_display": row_pkg_display,
+                        "is_pkg_member": cfg["is_national"],
+                        "nat_pkg_display": nat_pkg_display # 傳遞給 Excel 做合併用
                     })
 
             elif m == "家樂福":
@@ -268,10 +273,8 @@ def calculate_plan_data(config, total_budget, days_count):
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
                     "Formula": f"Net(${db['量販_全省']['Net']:,}) / {base_std} * {factor}",
-                    "Net_Unit": f"${unit_net:.2f}",
                     "Init_Spots": f"{spots_init} (Std: {base_std})",
                     "Penalty": f"x{penalty}",
-                    "Final_Cost": f"${unit_net * penalty:.2f}",
                     "Final_Spots": spots_final
                 }
                 debug_logs.append(log_details)
@@ -281,16 +284,16 @@ def calculate_plan_data(config, total_budget, days_count):
                 total_rate_h = unit_rate_h * spots_final
                 
                 total_list_accum += total_rate_h
-                rows.append({"media": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_display": total_rate_h, "pkg_display": total_rate_h})
+                rows.append({"media": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_display": total_rate_h, "pkg_display": total_rate_h, "is_pkg_member": False})
                 
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
-                rows.append({"media": m, "region": "全省超市", "program_num": STORE_COUNTS_NUM["家樂福_超市"], "daypart": db["超市_全省"]["Day_Part"], "seconds": sec, "spots": spots_s, "schedule": sch_s, "rate_display": "計量販", "pkg_display": "計量販"})
+                rows.append({"media": m, "region": "全省超市", "program_num": STORE_COUNTS_NUM["家樂福_超市"], "daypart": db["超市_全省"]["Day_Part"], "seconds": sec, "spots": spots_s, "schedule": sch_s, "rate_display": "計量販", "pkg_display": "計量販", "is_pkg_member": False})
 
     return rows, total_list_accum, debug_logs
 
 # =========================================================
-# 5. OpenPyXL 渲染引擎
+# 5. OpenPyXL 渲染引擎 (含合併儲存格邏輯)
 # =========================================================
 SHEET_META = {
     "Dongwu": {
@@ -484,6 +487,17 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
             top_cell.value = station_title(m_key)
             apply_center_style(top_cell)
 
+        # [NEW] 處理 Package Cost 的合併顯示 (僅限全省)
+        if needed > 0 and data[0].get("is_pkg_member", False):
+            pkg_col = cols.get("pkg")
+            if pkg_col:
+                unmerge_col_overlap(ws, pkg_col, curr_row, curr_row + needed - 1)
+                merge_pkg_rng = f"{pkg_col}{curr_row}:{pkg_col}{curr_row + needed - 1}"
+                ws.merge_cells(merge_pkg_rng)
+                # 寫入全省打包價到第一個儲存格
+                safe_write(ws, f"{pkg_col}{curr_row}", data[0]["nat_pkg_display"])
+                apply_center_style(ws[f"{pkg_col}{curr_row}"])
+
         for idx, r_data in enumerate(data):
             if not meta["station_merge"]:
                 cell = ws[f"{cols['station']}{curr_row}"]
@@ -500,11 +514,16 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 else: safe_write(ws, curr_row, cols["seconds"], int(r_data["seconds"]))
                 
                 safe_write(ws, curr_row, cols["rate"], r_data["rate_display"])
-                safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
+                # 若不是全省打包，則逐行寫入 Package Cost
+                if not r_data.get("is_pkg_member", False):
+                    safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
             else:
                 safe_write(ws, curr_row, cols["daypart"], r_data["daypart"])
                 safe_write(ws, curr_row, cols["seconds"], f"{r_data['seconds']}秒廣告")
-                if "pkg" in cols: safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
+                # Shenghuo 只有 pkg 欄位
+                if "pkg" in cols:
+                    if not r_data.get("is_pkg_member", False):
+                        safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
 
             set_schedule(ws, curr_row, meta["schedule_start_col"], meta["max_days"], r_data["schedule"])
             spot_sum = sum(r_data["schedule"][:meta["max_days"]])
@@ -595,33 +614,59 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
     for r in rows_sorted: media_counts[r["media"]] = media_counts.get(r["media"], 0) + 1
     media_printed = {m: False for m in media_counts}
 
-    for idx, r in enumerate(rows_sorted):
-        m = r["media"]
-        tbody += "<tr>"
-        if not media_printed[m]:
-            rowspan = media_counts[m]
-            display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
-            if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
-            if format_type == "Shenghuo": tbody += f"<td class='left'>{display_name}</td>"
-            else: tbody += f"<td class='left' rowspan='{rowspan}'>{display_name}</td>"; media_printed[m] = True
-        elif format_type == "Shenghuo":
-             display_name = "全家便利商店<br>廣播通路廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
-             tbody += f"<td class='left'>{display_name}</td>"
+    # HTML 預覽的合併邏輯
+    # 這裡比較複雜，我們需要先分組
+    grouped_rows = {}
+    for r in rows_sorted:
+        key = (r['media'], r['seconds']) # 同媒體同秒數視為一組
+        grouped_rows.setdefault(key, []).append(r)
 
-        loc_txt = region_display(r['region'])
-        if "北北基" in loc_txt and "廣播" in r['media']: loc_txt = "北區-北北基+東"
-        tbody += f"<td>{loc_txt}</td><td class='right'>{r.get('program_num','')}</td><td>{r['daypart']}</td>"
-        sec_txt = f"{r['seconds']}秒" if format_type=="Dongwu" and m=="家樂福" else f"{r['seconds']}" if format_type=="Dongwu" else f"{r['seconds']}秒廣告"
-        tbody += f"<td>{sec_txt}</td>"
+    for (m, sec), group in grouped_rows.items():
+        is_nat = group[0].get('is_pkg_member', False)
+        group_size = len(group)
         
-        rate = f"{r['rate_display']:,}" if isinstance(r['rate_display'], int) else r['rate_display']
-        pkg = f"{r['pkg_display']:,}" if isinstance(r['pkg_display'], int) else r['pkg_display']
-        
-        if format_type == "Dongwu": tbody += f"<td class='right'>{rate}</td><td class='right'>{pkg}</td>"
-        else: tbody += f"<td class='right'>{pkg}</td>"
-        
-        for d in r['schedule'][:eff_days]: tbody += f"<td>{d}</td>"
-        tbody += f"<td class='bg-total'>{r['spots']}</td></tr>"
+        for k, r_data in enumerate(group):
+            tbody += "<tr>"
+            
+            # Media Name Merging
+            if k == 0:
+                display_name = "全家便利商店<br>通路廣播廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
+                if format_type == "Shenghuo" and m == "全家廣播": display_name = "全家便利商店<br>廣播通路廣告"
+                if format_type == "Shenghuo": tbody += f"<td class='left'>{display_name}</td>"
+                else: tbody += f"<td class='left' rowspan='{group_size}'>{display_name}</td>"
+            elif format_type == "Shenghuo":
+                 display_name = "全家便利商店<br>廣播通路廣告" if m == "全家廣播" else "全家便利商店<br>新鮮視廣告" if m == "新鮮視" else "家樂福"
+                 tbody += f"<td class='left'>{display_name}</td>"
+
+            loc_txt = region_display(r_data['region'])
+            if "北北基" in loc_txt and "廣播" in r_data['media']: loc_txt = "北區-北北基+東"
+            tbody += f"<td>{loc_txt}</td><td class='right'>{r_data.get('program_num','')}</td><td>{r_data['daypart']}</td>"
+            sec_txt = f"{r_data['seconds']}秒" if format_type=="Dongwu" and m=="家樂福" else f"{r_data['seconds']}" if format_type=="Dongwu" else f"{r_data['seconds']}秒廣告"
+            tbody += f"<td>{sec_txt}</td>"
+            
+            rate = f"{r_data['rate_display']:,}" if isinstance(r_data['rate_display'], int) else r_data['rate_display']
+            pkg = f"{r_data['pkg_display']:,}" if isinstance(r_data['pkg_display'], int) else r_data['pkg_display']
+            
+            if format_type == "Dongwu": 
+                tbody += f"<td class='right'>{rate}</td>"
+                # Package Cost Merging
+                if is_nat:
+                    if k == 0:
+                        nat_pkg = f"{r_data['nat_pkg_display']:,}"
+                        tbody += f"<td class='right' rowspan='{group_size}'>{nat_pkg}</td>"
+                else:
+                    tbody += f"<td class='right'>{pkg}</td>"
+            else: 
+                # Shenghuo only has pkg col
+                if is_nat:
+                    if k == 0:
+                        nat_pkg = f"{r_data['nat_pkg_display']:,}"
+                        tbody += f"<td class='right' rowspan='{group_size}'>{nat_pkg}</td>"
+                else:
+                    tbody += f"<td class='right'>{pkg}</td>"
+            
+            for d in r_data['schedule'][:eff_days]: tbody += f"<td>{d}</td>"
+            tbody += f"<td class='bg-total'>{r_data['spots']}</td></tr>"
 
     totals = [sum([r["schedule"][d] for r in rows if d < len(r["schedule"])]) for d in range(eff_days)]
     colspan = 5
@@ -668,7 +713,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v74.2)")
+st.title("📺 媒體 Cue 表生成器 (v74.3)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -748,6 +793,7 @@ with col_cb3: is_cf = st.checkbox("家樂福", value=False, key="cb_cf", on_chan
 m1, m2, m3 = st.columns(3)
 config = {}
 
+# [FIX] UI 修正：確保最後一個秒數有顯示文字提示
 if is_rad:
     with m1:
         st.markdown("#### 📻 全家廣播")
@@ -755,18 +801,19 @@ if is_rad:
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
         st.slider("預算 %", 0, 100, key="rad_share", on_change=on_slider_change, args=("rad_share",))
-        
-        # [NEW] 秒數佔比分配
         sec_shares = {}
         if len(secs) > 1:
             st.caption("分配秒數佔比")
             rem = 100
-            for s in sorted(secs)[:-1]:
-                v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"rs_{s}")
-                sec_shares[s] = v; rem -= v
-            sec_shares[sorted(secs)[-1]] = rem
+            sorted_secs = sorted(secs)
+            for i, s in enumerate(sorted_secs):
+                if i < len(sorted_secs) - 1:
+                    v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"rs_{s}")
+                    sec_shares[s] = v; rem -= v
+                else:
+                    sec_shares[s] = rem
+                    st.markdown(f"🔹 **{s}秒**: {rem}% (自動計算)")
         elif secs: sec_shares[secs[0]] = 100
-        
         config["全家廣播"] = {"is_national": is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.rad_share}
 
 if is_fv:
@@ -776,18 +823,19 @@ if is_fv:
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
         secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
         st.slider("預算 %", 0, 100, key="fv_share", on_change=on_slider_change, args=("fv_share",))
-        
-        # [NEW] 秒數佔比分配
         sec_shares = {}
         if len(secs) > 1:
             st.caption("分配秒數佔比")
             rem = 100
-            for s in sorted(secs)[:-1]:
-                v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"fs_{s}")
-                sec_shares[s] = v; rem -= v
-            sec_shares[sorted(secs)[-1]] = rem
+            sorted_secs = sorted(secs)
+            for i, s in enumerate(sorted_secs):
+                if i < len(sorted_secs) - 1:
+                    v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"fs_{s}")
+                    sec_shares[s] = v; rem -= v
+                else:
+                    sec_shares[s] = rem
+                    st.markdown(f"🔹 **{s}秒**: {rem}% (自動計算)")
         elif secs: sec_shares[secs[0]] = 100
-        
         config["新鮮視"] = {"is_national": is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.fv_share}
 
 if is_cf:
@@ -795,18 +843,19 @@ if is_cf:
         st.markdown("#### 🛒 家樂福")
         secs = st.multiselect("秒數", DURATIONS, [20], key="cf_sec")
         st.slider("預算 %", 0, 100, key="cf_share", on_change=on_slider_change, args=("cf_share",))
-        
-        # [NEW] 秒數佔比分配
         sec_shares = {}
         if len(secs) > 1:
             st.caption("分配秒數佔比")
             rem = 100
-            for s in sorted(secs)[:-1]:
-                v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"cs_{s}")
-                sec_shares[s] = v; rem -= v
-            sec_shares[sorted(secs)[-1]] = rem
+            sorted_secs = sorted(secs)
+            for i, s in enumerate(sorted_secs):
+                if i < len(sorted_secs) - 1:
+                    v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"cs_{s}")
+                    sec_shares[s] = v; rem -= v
+                else:
+                    sec_shares[s] = rem
+                    st.markdown(f"🔹 **{s}秒**: {rem}% (自動計算)")
         elif secs: sec_shares[secs[0]] = 100
-        
         config["家樂福"] = {"regions": ["全省"], "sec_shares": sec_shares, "share": st.session_state.cf_share}
 
 if config:
