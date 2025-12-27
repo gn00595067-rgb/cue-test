@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.2")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.3")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -230,6 +230,7 @@ def calculate_plan_data(config, total_budget, days_count):
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
+                # --- Step 1: Net 算檔次 ---
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -328,14 +329,13 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_accum, debug_logs
 
 # =========================================================
-# 5. OpenPyXL 渲染引擎 (修復版)
+# 5. OpenPyXL 渲染引擎 (修復版: 拆分 safe_write)
 # =========================================================
 SHEET_META = {
     "Dongwu": {
         "sheet_name": "東吳-格式", "date_start_cell": "I7", "schedule_start_col": "I", "max_days": 31, "total_col": "AN",
         "anchors": {"全家廣播": "通路廣播廣告", "新鮮視": "新鮮視廣告", "家樂福": "家樂福"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "rate": "G", "pkg": "H"},
-        # [FIXED] 補回遺失的 header_cells
         "header_cells": {"client": "C3", "product": "C4", "period": "C5", "medium": "C6", "month": "I6"},
         "header_override": {"G7": "rate\n(Net)", "H7": "Package-cost\n(Net)"},
         "station_merge": True, "total_label": "Total",
@@ -369,29 +369,38 @@ def copy_style(source_cell, target_cell):
         target_cell.alignment = copy(source_cell.alignment)
         target_cell.protection = copy(source_cell.protection)
 
-def safe_write(ws, row, col_letter, value, center=False):
-    col_idx = column_index_from_string(col_letter)
-    cell = ws.cell(row, col_idx)
+# 1. Row/Col Writer
+def safe_write_rc(ws, row, col, value, center=False):
+    if isinstance(col, str): col = column_index_from_string(col)
+    cell = ws.cell(row, col)
     if isinstance(cell, MergedCell):
-        for mr in ws.merged_cells.ranges:
-            if mr.min_row <= row <= mr.max_row and mr.min_col <= col_idx <= mr.max_col:
-                cell = ws.cell(mr.min_row, mr.min_col)
-                break
+        master = _get_master_cell(ws, cell)
+        if master: cell = master
     cell.value = value
     if center:
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+# 2. Address Writer (C3, A1...)
+def safe_write_addr(ws, addr, value):
+    cell = ws[addr]
+    if isinstance(cell, MergedCell):
+        master = _get_master_cell(ws, cell)
+        if master: cell = master
+    cell.value = value
+
+def _get_master_cell(ws, cell):
+    if not isinstance(cell, MergedCell): return cell
+    for mr in ws.merged_cells.ranges:
+        if mr.min_row <= cell.row <= mr.max_row and mr.min_col <= cell.column <= mr.max_col:
+            return ws.cell(row=mr.min_row, column=mr.min_col)
+    return None
 
 def copy_row_with_style_fix(ws, src_row, dst_row, max_col):
     ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
     for c in range(1, max_col + 1):
         sc = ws.cell(src_row, c)
         dc = ws.cell(dst_row, c)
-        if sc.has_style:
-            dc.font = copy(sc.font)
-            dc.border = copy(sc.border)
-            dc.fill = copy(sc.fill)
-            dc.number_format = sc.number_format
-            dc.alignment = copy(sc.alignment)
+        copy_style(sc, dc)
         v = sc.value
         if isinstance(v, str) and v.startswith("="):
             try: dc.value = Translator(v, origin=sc.coordinate).translate_formula(row_shift=(dst_row - src_row), col_shift=0)
@@ -415,20 +424,6 @@ def set_schedule(ws, row, start_col_letter, max_days, schedule_list):
         v = schedule_list[i] if (schedule_list and i < len(schedule_list)) else None
         safe_write_rc(ws, row, start_col + i, v)
 
-def safe_write_rc(ws, row, col, value):
-    cell = ws.cell(row=row, column=col)
-    if isinstance(cell, MergedCell):
-        master = _get_master_cell(ws, cell)
-        if master: master.value = value
-    else: cell.value = value
-
-def _get_master_cell(ws, cell):
-    if not isinstance(cell, MergedCell): return cell
-    for mr in ws.merged_cells.ranges:
-        if mr.min_row <= cell.row <= mr.max_row and mr.min_col <= cell.column <= mr.max_col:
-            return ws.cell(row=mr.min_row, column=mr.min_col)
-    return None
-
 def find_first_row_contains(ws, col_letter, keyword):
     col_idx = column_index_from_string(col_letter)
     for r in range(1, ws.max_row + 1):
@@ -436,12 +431,16 @@ def find_first_row_contains(ws, col_letter, keyword):
         if isinstance(v, str) and keyword in v: return r
     return None
 
+def apply_center_style(cell):
+    al = cell.alignment or Alignment()
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True, indent=al.indent)
+
 def force_center_columns_range(ws, col_letters, start_row, end_row):
     if start_row is None or end_row is None: return
     for r in range(start_row, end_row + 1):
         for col in col_letters:
-            addr = f"{col}{r}"
-            cell = ws[addr]
+            safe_col = column_index_from_string(col)
+            cell = ws.cell(r, safe_col)
             if isinstance(cell, MergedCell):
                 master = _get_master_cell(ws, cell)
                 if master: cell = master
@@ -458,14 +457,17 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         if s != target_sheet: del wb[s]
     ws = wb[target_sheet]
 
+    # [FIXED] Use safe_write_addr for headers
     hc = meta["header_cells"]
-    if "client" in hc: safe_write(ws, hc["client"], client_name)
-    if "product" in hc: safe_write(ws, hc["product"], product_display_str)
-    if "period" in hc: safe_write(ws, hc["period"], f"{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y.%m. %d')}")
-    if "medium" in hc: safe_write(ws, hc["medium"], " ".join(sorted(set([r["media"] for r in rows]))))
-    if "month" in hc: safe_write(ws, hc["month"], f" {start_dt.month}月")
-    safe_write(ws, meta["date_start_cell"], datetime(start_dt.year, start_dt.month, start_dt.day))
-    for addr, text in meta.get("header_override", {}).items(): safe_write(ws, addr, text)
+    if "client" in hc: safe_write_addr(ws, hc["client"], client_name)
+    if "product" in hc: safe_write_addr(ws, hc["product"], product_display_str)
+    if "period" in hc: safe_write_addr(ws, hc["period"], f"{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y.%m. %d')}")
+    if "medium" in hc: safe_write_addr(ws, hc["medium"], " ".join(sorted(set([r["media"] for r in rows]))))
+    if "month" in hc: safe_write_addr(ws, hc["month"], f" {start_dt.month}月")
+    safe_write_addr(ws, meta["date_start_cell"], datetime(start_dt.year, start_dt.month, start_dt.day))
+    
+    for addr, text in meta.get("header_override", {}).items(): 
+        safe_write_addr(ws, addr, text)
 
     total_cell = find_row_by_content(ws, meta["cols"]["station"], meta["total_label"])
     if not total_cell: return None
@@ -531,8 +533,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 unmerge_col_overlap(ws, pkg_col, curr_row, curr_row + needed - 1)
                 merge_pkg = f"{pkg_col}{curr_row}:{pkg_col}{curr_row + needed - 1}"
                 ws.merge_cells(merge_pkg)
-                safe_write(ws, f"{pkg_col}{curr_row}", data[0]["nat_pkg_display"])
-                apply_center_style(ws[f"{pkg_col}{curr_row}"])
+                safe_write_rc(ws, curr_row, pkg_col, data[0]["nat_pkg_display"], center=True)
 
         for idx, r_data in enumerate(data):
             if not meta["station_merge"]:
@@ -540,27 +541,27 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 cell.value = station_title(m_key)
                 apply_center_style(cell)
             
-            safe_write(ws, curr_row, cols["location"], region_display(r_data["region"]))
+            safe_write_rc(ws, curr_row, cols["location"], region_display(r_data["region"]))
             prog_val = r_data.get("program_num", 0)
-            safe_write(ws, curr_row, cols["program"], int(prog_val))
+            safe_write_rc(ws, curr_row, cols["program"], int(prog_val))
 
             if format_type == "Dongwu":
-                safe_write(ws, curr_row, cols["daypart"], r_data["daypart"])
-                if m_key == "家樂福": safe_write(ws, curr_row, cols["seconds"], f"{r_data['seconds']}秒")
-                else: safe_write(ws, curr_row, cols["seconds"], int(r_data["seconds"]))
+                safe_write_rc(ws, curr_row, cols["daypart"], r_data["daypart"])
+                if m_key == "家樂福": safe_write_rc(ws, curr_row, cols["seconds"], f"{r_data['seconds']}秒")
+                else: safe_write_rc(ws, curr_row, cols["seconds"], int(r_data["seconds"]))
                 
-                safe_write(ws, curr_row, cols["rate"], r_data["rate_display"])
+                safe_write_rc(ws, curr_row, cols["rate"], r_data["rate_display"])
                 if not r_data.get("is_pkg_member", False):
-                    safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
+                    safe_write_rc(ws, curr_row, cols["pkg"], r_data["pkg_display"])
             else:
-                safe_write(ws, curr_row, cols["daypart"], r_data["daypart"])
-                safe_write(ws, curr_row, cols["seconds"], f"{r_data['seconds']}秒廣告")
+                safe_write_rc(ws, curr_row, cols["daypart"], r_data["daypart"])
+                safe_write_rc(ws, curr_row, cols["seconds"], f"{r_data['seconds']}秒廣告")
                 if "pkg" in cols and not r_data.get("is_pkg_member", False):
-                    safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
+                    safe_write_rc(ws, curr_row, cols["pkg"], r_data["pkg_display"])
 
             set_schedule(ws, curr_row, meta["schedule_start_col"], meta["max_days"], r_data["schedule"])
             spot_sum = sum(r_data["schedule"][:meta["max_days"]])
-            safe_write(ws, curr_row, meta["total_col"], spot_sum)
+            safe_write_rc(ws, curr_row, meta["total_col"], spot_sum)
             curr_row += 1
             
         current_end_marker = start_row_orig - 1
@@ -570,23 +571,23 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
         eff_days = min((end_dt - start_dt).days + 1, meta["max_days"])
         daily_sums = [sum([x["schedule"][d] for x in rows if d < len(x["schedule"])]) for d in range(eff_days)]
         set_schedule(ws, total_row, meta["schedule_start_col"], meta["max_days"], daily_sums)
-        safe_write(ws, total_row, meta["total_col"], sum(daily_sums))
+        safe_write_rc(ws, total_row, meta["total_col"], sum(daily_sums))
         
         pkg_col = cols.get("pkg") or cols.get("proj_price")
-        safe_write(ws, total_row, pkg_col, total_list_accum)
+        safe_write_rc(ws, total_row, pkg_col, total_list_accum)
 
         lbl = meta["footer_labels"]
         make_fee = 10000 
         pos_make = find_row_by_content(ws, "B", lbl["make"])
         if pos_make:
-            safe_write(ws, pos_make, pkg_col, make_fee)
+            safe_write_rc(ws, pos_make, pkg_col, make_fee)
         
         vat = int(round((total_list_accum + make_fee) * 0.05))
         pos_vat = find_row_by_content(ws, "B", lbl["vat"])
-        if pos_vat: safe_write(ws, pos_vat, pkg_col, vat)
+        if pos_vat: safe_write_rc(ws, pos_vat, pkg_col, vat)
         
         pos_grand = find_row_by_content(ws, "B", lbl["grand"])
-        if pos_grand: safe_write(ws, pos_grand, pkg_col, total_list_accum + make_fee + vat)
+        if pos_grand: safe_write_rc(ws, pos_grand, pkg_col, total_list_accum + make_fee + vat)
 
     rem_pos = find_row_by_content(ws, "B", "Remarks：")
     if rem_pos:
@@ -737,7 +738,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v75.2)")
+st.title("📺 媒體 Cue 表生成器 (v75.3)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
