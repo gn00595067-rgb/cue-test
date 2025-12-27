@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v73.2")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.0")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -164,7 +164,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v3.1 - 雙重懲罰機制)
+# 4. 核心計算函式 (Logic v4.0 - Rate顯示總價 & 雙重懲罰)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -184,7 +184,7 @@ def calculate_plan_data(config, total_budget, days_count):
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
-                # Step 1: Net 算檔次
+                # Net 算檔次
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -193,23 +193,22 @@ def calculate_plan_data(config, total_budget, days_count):
                 spots_init = math.ceil(s_budget / unit_net_sum)
                 is_under_target = spots_init < db["Std_Spots"]
                 
-                # [邏輯核心] 懲罰分流
-                # 1. 運算用 (Calc): 只要未達標，Net 成本一律墊高 (x1.1)，因為 Total 會變貴，預算能買的檔次變少
+                # 懲罰邏輯分流
+                # 1. 運算用 (Net 成本): 未達標一律 x1.1
                 calc_penalty = 1.1 if is_under_target else 1.0 
                 
-                # 2. 顯示用 (Display):
+                # 2. 顯示用 (List 價格): 
                 if cfg["is_national"]:
-                    # 全省: 分區列(Row)不懲罰，總計(Total)要懲罰
+                    # 全省: 分區列(Row)不懲罰，Total(總價)懲罰
                     row_display_penalty = 1.0 
                     total_display_penalty = 1.1 if is_under_target else 1.0
                     status_msg = "全省(分區豁免/總價懲罰)" if is_under_target else "達標"
                 else:
-                    # 分區: 分區列(Row)要懲罰，總計(Total)就是加總
+                    # 分區: 分區列(Row)要懲罰
                     row_display_penalty = 1.1 if is_under_target else 1.0
-                    total_display_penalty = 1.0 # 沒用到，因為是 Sum
+                    total_display_penalty = 1.0 
                     status_msg = "未達標 x1.1" if is_under_target else "達標"
 
-                # 計算最終檔次 (使用墊高後的 Net)
                 spots_final = math.ceil(s_budget / (unit_net_sum * calc_penalty))
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
@@ -217,22 +216,23 @@ def calculate_plan_data(config, total_budget, days_count):
                 sch = calculate_schedule(spots_final, days_count)
                 debug_logs.append(f"{m} {sec}s: {status_msg}, Spots: {spots_final}")
 
-                # Step 2: List 填表格
+                # List 填表格
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
                     
-                    # [關鍵] 分區顯示單價 (使用 row_display_penalty)
-                    rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
-                    pkg_display = rate_display * spots_final
+                    # [關鍵修正] Rate 顯示分區「總價」(Unit * Spots)
+                    unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
+                    total_rate_display = unit_rate_display * spots_final  # 這裡算出總價
+                    
+                    pkg_display = total_rate_display # Package Cost 也是總價
                     
                     if cfg["is_national"]:
-                        # 全省 Total 計算：使用全省 List Price * total_display_penalty
+                        # 全省 Total 計算：使用全省 List Price
                         if i == 0:
                             nat_list = db["全省"][0]
-                            nat_rate = int((nat_list / db["Std_Spots"]) * factor * total_display_penalty)
-                            total_list_accum += nat_rate * spots_final
+                            nat_unit = int((nat_list / db["Std_Spots"]) * factor * total_display_penalty)
+                            total_list_accum += nat_unit * spots_final
                     else:
-                        # 分區購買：正常累加
                         total_list_accum += pkg_display
 
                     rows.append({
@@ -240,7 +240,9 @@ def calculate_plan_data(config, total_budget, days_count):
                         "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
                         "daypart": db["Day_Part"], "seconds": sec,
                         "spots": spots_final, "schedule": sch,
-                        "rate_display": rate_display, "pkg_display": pkg_display,
+                        # Rate 顯示總價
+                        "rate_display": total_rate_display, 
+                        "pkg_display": pkg_display,
                         "is_pkg_member": cfg["is_national"]
                     })
 
@@ -250,19 +252,18 @@ def calculate_plan_data(config, total_budget, days_count):
                 unit_net = (db["量販_全省"]["Net"] / base_std) * factor
                 
                 spots_init = math.ceil(s_budget / unit_net)
-                penalty = 1.1 if spots_init < base_std else 1.0 # 家樂福維持原邏輯
-                
+                penalty = 1.1 if spots_init < base_std else 1.0
                 spots_final = math.ceil(s_budget / (unit_net * penalty))
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
-                # 量販顯示 (含懲罰)
+                # 量販顯示 (Rate 顯示總價)
                 base_list = db["量販_全省"]["List"]
-                rate_h = int((base_list / base_std) * factor * penalty)
-                pkg_h = rate_h * spots_final
+                unit_rate_h = int((base_list / base_std) * factor * penalty)
+                total_rate_h = unit_rate_h * spots_final
                 
-                total_list_accum += pkg_h
-                rows.append({"media": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_display": rate_h, "pkg_display": pkg_h})
+                total_list_accum += total_rate_h
+                rows.append({"media": m, "region": "全省量販", "program_num": STORE_COUNTS_NUM["家樂福_量販"], "daypart": db["量販_全省"]["Day_Part"], "seconds": sec, "spots": spots_final, "schedule": sch_h, "rate_display": total_rate_h, "pkg_display": total_rate_h})
                 
                 spots_s = int(spots_final * (db["超市_全省"]["Std_Spots"] / base_std))
                 sch_s = calculate_schedule(spots_s, days_count)
@@ -278,7 +279,6 @@ SHEET_META = {
         "sheet_name": "東吳-格式", "date_start_cell": "I7", "schedule_start_col": "I", "max_days": 31, "total_col": "AN",
         "anchors": {"全家廣播": "通路廣播廣告", "新鮮視": "新鮮視廣告", "家樂福": "家樂福"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "rate": "G", "pkg": "H"},
-        # [Display Logic] 表頭顯示 rate(Net) 但其實是填 List Price
         "header_override": {"G7": "rate\n(Net)", "H7": "Package-cost\n(Net)"},
         "station_merge": True, "total_label": "Total",
         "footer_labels": {"make": "製作", "vat": "5% VAT", "grand": "Grand Total"},
@@ -650,7 +650,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v73.2)")
+st.title("📺 媒體 Cue 表生成器 (v74.0)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
