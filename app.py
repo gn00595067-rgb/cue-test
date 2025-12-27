@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.1")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.2")
 
 # =========================================================
 # 2. PDF 策略
@@ -182,7 +182,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.4)
+# 4. 核心計算函式 (Logic v4.5 - Detailed Debug Restored)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -210,6 +210,8 @@ def calculate_plan_data(config, total_budget, days_count):
                 
                 spots_init = math.ceil(s_budget / unit_net_sum)
                 is_under_target = spots_init < db["Std_Spots"]
+                
+                # 懲罰邏輯
                 calc_penalty = 1.1 if is_under_target else 1.0 
                 
                 if cfg["is_national"]:
@@ -225,12 +227,15 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
+                # [RESTORED] 詳細 Log
                 debug_logs.append({
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
-                    "Formula": f"Net總和(${sum([db[r][1] for r in calc_regs]):,}) / {db['Std_Spots']} * {factor}",
                     "Net_Unit": f"${unit_net_sum:.2f}",
-                    "Penalty": f"x{calc_penalty} ({status_msg})",
+                    "Std_Spots": f"{db['Std_Spots']}",
+                    "Init_Spots": f"{spots_init}",
+                    "Penalty_Status": status_msg,
+                    "Penalty_Factor": f"x{calc_penalty}",
                     "Final_Cost": f"${unit_net_sum * calc_penalty:.2f}",
                     "Final_Spots": spots_final
                 })
@@ -267,18 +272,24 @@ def calculate_plan_data(config, total_budget, days_count):
                 db = PRICING_DB["家樂福"]
                 base_std = db["量販_全省"]["Std_Spots"]
                 unit_net = (db["量販_全省"]["Net"] / base_std) * factor
+                
                 spots_init = math.ceil(s_budget / unit_net)
                 penalty = 1.1 if spots_init < base_std else 1.0
+                status_msg = "未達標 x1.1" if penalty > 1 else "達標"
+                
                 spots_final = math.ceil(s_budget / (unit_net * penalty))
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
+                # [RESTORED] 詳細 Log
                 debug_logs.append({
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
-                    "Formula": f"Net(${db['量販_全省']['Net']:,}) / {base_std} * {factor}",
                     "Net_Unit": f"${unit_net:.2f}",
-                    "Penalty": f"x{penalty}",
+                    "Std_Spots": f"{base_std}",
+                    "Init_Spots": f"{spots_init}",
+                    "Penalty_Status": status_msg,
+                    "Penalty_Factor": f"x{penalty}",
                     "Final_Cost": f"${unit_net * penalty:.2f}",
                     "Final_Spots": spots_final
                 })
@@ -420,6 +431,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     target_sheet = wb.sheetnames[0] 
     ws = wb[target_sheet]
 
+    # Header
     hc = meta["header_cells"]
     if "client" in hc: safe_write_addr(ws, hc["client"], client_name)
     if "product" in hc: safe_write_addr(ws, hc["product"], product_display_str)
@@ -431,6 +443,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     for addr, text in meta.get("header_override", {}).items(): 
         safe_write_addr(ws, addr, text)
 
+    # Content
     cols = meta["cols"]
     total_cell = find_row_by_content(ws, cols["station"], meta["total_label"])
     if not total_cell: return None
@@ -693,12 +706,13 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v76.1)")
+st.title("📺 媒體 Cue 表生成器 (v76.2)")
 
 st.markdown("### 1. 選擇格式")
 c1, c2 = st.columns(2)
 format_type = c1.radio("", ["Dongwu", "Shenghuo"], horizontal=True)
 
+# 雙模版上傳
 tpl_file = None
 if format_type == "Dongwu":
     tpl_file = c2.file_uploader("上傳【東吳】樣板 (.xlsx)", type=["xlsx"], key="upl_dw")
@@ -856,26 +870,36 @@ if config:
     p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}"
     rem = get_remarks_text(sign_deadline, billing_month, payment_date)
 
+    # HTML Preview
     html_preview = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, total_list_accum, grand_total, total_budget_input, prod_cost)
     st.components.v1.html(html_preview, height=700, scrolling=True)
 
     with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
+        st.markdown("#### 1. 本次預算分配詳細運算")
         for log in logs:
-            st.markdown(f"**{log.get('Media', 'N/A')}** - 公式: {log.get('Formula', 'N/A')}")
+            st.markdown(f"### {log.get('Media')}")
+            st.markdown(f"- **預算**: {log.get('Budget')}")
+            st.markdown(f"- **公式**: {log.get('Net_Unit')} (Net單價) × {log.get('Penalty_Factor')} (懲罰) = {log.get('Final_Cost')} (最終單價)")
+            st.markdown(f"- **檔次計算**: {log.get('Init_Spots')} (試算) vs {log.get('Std_Spots')} (標準) -> **{log.get('Penalty_Status')}**")
+            st.markdown(f"- **最終執行**: **{log.get('Final_Spots')}** 檔")
             st.divider()
 
-    if template_bytes and rows:
-        try:
-            xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes, total_list_accum)
-            if xlsx:
-                st.download_button("📥 下載擬真 Excel", xlsx, f"Cue_{safe_filename(client_name)}.xlsx")
-                
-                pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx)
-                if pdf_bytes:
-                    st.download_button(f"📥 下載擬真 PDF ({method})", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
-                else:
-                    st.warning(f"本地轉檔失敗 ({err})，使用網頁渲染版")
-                    pdf_bytes, err = html_to_pdf_weasyprint(html_preview)
-                    if pdf_bytes: st.download_button("📥 下載 PDF (Web版)", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
-        except Exception as e:
-            st.error(f"Excel 產出錯誤: {e}")
+    # Excel / PDF Download
+    if rows:
+        if template_bytes:
+            try:
+                xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes, total_list_accum)
+                if xlsx:
+                    st.download_button("📥 下載擬真 Excel", xlsx, f"Cue_{safe_filename(client_name)}.xlsx")
+                    
+                    pdf_bytes, method, err = xlsx_bytes_to_pdf_bytes(xlsx)
+                    if pdf_bytes:
+                        st.download_button(f"📥 下載擬真 PDF ({method})", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
+                    else:
+                        st.warning(f"本地轉檔失敗 ({err})，使用網頁渲染版")
+                        pdf_bytes, err = html_to_pdf_weasyprint(html_preview)
+                        if pdf_bytes: st.download_button("📥 下載 PDF (Web版)", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
+            except Exception as e:
+                st.error(f"Excel 產出錯誤: {e}")
+        else:
+            st.warning("⚠️ 請上傳 Excel 樣板以啟用下載按鈕 (上方區塊)")
