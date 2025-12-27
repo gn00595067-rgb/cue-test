@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.0 (Cloud Config)")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.1")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -110,28 +110,26 @@ def html_to_pdf_weasyprint(html_str):
     except Exception as e: return None, str(e)
 
 # =========================================================
-# 3. 核心資料設定 (雲端 Google Sheet 版)
+# 3. 核心資料設定 (雲端 Google Sheet 版 - [FIXED])
 # =========================================================
-# 您提供的 Google Sheet 連結
+# 這是您提供的公開連結
 GSHEET_SHARE_URL = "https://docs.google.com/spreadsheets/d/1bzmG-N8XFsj8m3LUPqA8K70AcIqaK4Qhq1VPWcK0w_s/edit?usp=sharing"
 
-@st.cache_data(ttl=300) # 5分鐘快取，避免頻繁請求
+@st.cache_data(ttl=300) # 5分鐘快取
 def load_config_from_cloud(share_url):
     try:
         # 解析 File ID
         match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)
-        if not match: return None, None, None, None, "連結格式錯誤，請提供標準 Google Sheet 分享連結"
+        if not match: return None, None, None, None, "連結格式錯誤"
         file_id = match.group(1)
         
         # 定義讀取函式 (使用 gviz API，支援指定 sheet name)
         def read_sheet(sheet_name):
             url = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
-            # 使用 pandas 讀取 CSV
             return pd.read_csv(url)
 
         # 1. 載入店數 (Stores)
         df_store = read_sheet("Stores")
-        # 簡單清理欄位名稱空格 (防呆)
         df_store.columns = [c.strip() for c in df_store.columns]
         store_counts = dict(zip(df_store['Key'], df_store['Display_Name']))
         store_counts_num = dict(zip(df_store['Key'], df_store['Count']))
@@ -144,35 +142,49 @@ def load_config_from_cloud(share_url):
             if row['Media'] not in sec_factors: sec_factors[row['Media']] = {}
             sec_factors[row['Media']][int(row['Seconds'])] = float(row['Factor'])
 
-        # 3. 載入價格表 (Pricing DB)
+        # 3. 載入價格表 (Pricing DB) - [FIX] 家樂福特殊結構處理
         df_price = read_sheet("Pricing")
         df_price.columns = [c.strip() for c in df_price.columns]
         pricing_db = {}
+        
         for _, row in df_price.iterrows():
             m = row['Media']
             r = row['Region']
-            if m not in pricing_db:
-                pricing_db[m] = {
+            
+            # 家樂福：需要保留每一列的 Std_Spots 和 Day_Part
+            if m == "家樂福":
+                if m not in pricing_db: pricing_db[m] = {}
+                pricing_db[m][r] = {
+                    "List": int(row['List_Price']),
+                    "Net": int(row['Net_Price']),
                     "Std_Spots": int(row['Std_Spots']),
                     "Day_Part": row['Day_Part']
                 }
-            # 寫入分區價格 [List, Net]
-            pricing_db[m][r] = [int(row['List_Price']), int(row['Net_Price'])]
+            
+            # 廣播/新鮮視：Std_Spots 和 Day_Part 統一在媒體層級
+            else:
+                if m not in pricing_db:
+                    pricing_db[m] = {
+                        "Std_Spots": int(row['Std_Spots']),
+                        "Day_Part": row['Day_Part']
+                    }
+                # 寫入分區價格 [List, Net]
+                pricing_db[m][r] = [int(row['List_Price']), int(row['Net_Price'])]
             
         return store_counts, store_counts_num, pricing_db, sec_factors, None
 
     except Exception as e:
         return None, None, None, None, f"讀取失敗: {str(e)}"
 
-# 執行讀取 (顯示 Spinner 讓使用者知道正在連線)
+# 執行讀取
 with st.spinner("正在連線 Google Sheet 載入最新價格表..."):
     STORE_COUNTS, STORE_COUNTS_NUM, PRICING_DB, SEC_FACTORS, err_msg = load_config_from_cloud(GSHEET_SHARE_URL)
 
 if err_msg:
-    st.error(f"❌ 設定檔載入失敗！\n\n原因: {err_msg}\n\n請確認：\n1. Google Sheet 是否有 'Pricing', 'Stores', 'Factors' 三個分頁。\n2. 共用權限是否已開啟為 **'知道連結的任何人皆可檢視'**。")
-    st.stop() # 停止程式，避免後續報錯
+    st.error(f"❌ 設定檔載入失敗！\n\n原因: {err_msg}\n\n請確認 Google Sheet 分頁名稱 ('Pricing', 'Stores', 'Factors') 與權限。")
+    st.stop()
 
-# 固定的區域順序與秒數清單 (這兩個通常很少變，維持寫死以確保 UI 穩定)
+# 固定的區域順序與秒數清單
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
@@ -227,7 +239,7 @@ def calculate_plan_data(config, total_budget, days_count):
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
-                # Net 算檔次
+                # --- Step 1: Net 算檔次 ---
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -263,6 +275,7 @@ def calculate_plan_data(config, total_budget, days_count):
 
                 sch = calculate_schedule(spots_final, days_count)
 
+                # 計算全省打包總價 (用於合併)
                 nat_pkg_display = 0
                 if cfg["is_national"]:
                     nat_list = db["全省"][0]
@@ -270,8 +283,10 @@ def calculate_plan_data(config, total_budget, days_count):
                     nat_pkg_display = nat_unit_price * spots_final
                     total_list_accum += nat_pkg_display
 
+                # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
+                    # 分區顯示總價 (Rate = Unit * Spots)
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
                     total_rate_display = unit_rate_display * spots_final 
                     
@@ -292,6 +307,7 @@ def calculate_plan_data(config, total_budget, days_count):
 
             elif m == "家樂福":
                 db = PRICING_DB["家樂福"]
+                # [FIX] 使用字典式讀取
                 base_std = db["量販_全省"]["Std_Spots"]
                 unit_net = (db["量販_全省"]["Net"] / base_std) * factor
                 
@@ -326,7 +342,7 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_accum, debug_logs
 
 # =========================================================
-# 5. OpenPyXL 渲染引擎
+# 5. OpenPyXL 渲染引擎 (含合併儲存格邏輯)
 # =========================================================
 SHEET_META = {
     "Dongwu": {
@@ -737,7 +753,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v75.0)")
+st.title("📺 媒體 Cue 表生成器 (v75.1)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -817,7 +833,6 @@ with col_cb3: is_cf = st.checkbox("家樂福", value=False, key="cb_cf", on_chan
 m1, m2, m3 = st.columns(3)
 config = {}
 
-# [FIX] UI 修正：確保最後一個秒數有顯示文字提示
 if is_rad:
     with m1:
         st.markdown("#### 📻 全家廣播")
