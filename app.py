@@ -36,34 +36,12 @@ def html_escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 # =========================================================
-# 1. 頁面設定 & 自動載入
+# 1. 頁面設定
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.4")
-
-GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
-DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
-
-@st.cache_resource(ttl=600)
-def load_default_template():
-    status_msg = []
-    if GOOGLE_DRIVE_FILE_ID:
-        url = f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}"
-        try:
-            r = requests.get(url, timeout=20, allow_redirects=True)
-            if r.status_code == 200 and b"<!DOCTYPE html>" not in r.content[:500]:
-                return r.content, "雲端硬碟 (Google Drive)", status_msg
-        except Exception as e:
-            status_msg.append(f"❌ 連線錯誤: {e}")
-
-    if os.path.exists(DEFAULT_FILENAME):
-        try:
-            with open(DEFAULT_FILENAME, "rb") as f:
-                return f.read(), "系統主機 (Local)", status_msg
-        except: pass
-    return None, None, status_msg
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.0")
 
 # =========================================================
-# 2. PDF 策略 (優先 LibreOffice，備援 WeasyPrint)
+# 2. PDF 策略
 # =========================================================
 def find_soffice_path():
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
@@ -328,7 +306,8 @@ def calculate_plan_data(config, total_budget, days_count):
 # =========================================================
 SHEET_META = {
     "Dongwu": {
-        "sheet_name": "東吳-格式", "date_start_cell": "I7", "schedule_start_col": "I", "max_days": 31, "total_col": "AN",
+        "sheet_name": "Sheet1", 
+        "date_start_cell": "I7", "schedule_start_col": "I", "max_days": 31, "total_col": "AN",
         "anchors": {"全家廣播": "通路廣播廣告", "新鮮視": "新鮮視廣告", "家樂福": "家樂福"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "rate": "G", "pkg": "H"},
         "header_cells": {"client": "C3", "product": "C4", "period": "C5", "medium": "C6", "month": "I6"},
@@ -338,7 +317,8 @@ SHEET_META = {
         "force_center_cols": ["E", "F", "G", "H"], 
     },
     "Shenghuo": {
-        "sheet_name": "聲活-格式", "date_start_cell": "G7", "schedule_start_col": "G", "max_days": 23, "total_col": "AD",
+        "sheet_name": "Sheet1",
+        "date_start_cell": "G7", "schedule_start_col": "G", "max_days": 23, "total_col": "AD",
         "anchors": {"全家廣播": "廣播通路廣告", "新鮮視": "新鮮視廣告", "家樂福": "家樂福"},
         "cols": {"station": "B", "location": "C", "program": "D", "daypart": "E", "seconds": "F", "pkg": "AF"},
         "header_cells": {"client": "C5", "product": "C6", "month": "G6"},
@@ -358,7 +338,6 @@ def safe_write_rc(ws, row, col, value, center=False):
                 break
     cell.value = value
     if center:
-        # Style Copy and center
         if cell.has_style:
             new_align = copy(cell.alignment)
             new_align.horizontal = 'center'
@@ -430,7 +409,10 @@ def force_center_columns_range(ws, col_letters, start_row, end_row):
         for col in col_letters:
             safe_col = column_index_from_string(col)
             cell = ws.cell(r, safe_col)
-            # Center logic inline
+            if isinstance(cell, MergedCell):
+                master = _get_master_cell(ws, cell)
+                if master: cell = master
+                else: continue
             if cell.has_style:
                 new_align = copy(cell.alignment)
                 new_align.horizontal = 'center'
@@ -581,21 +563,8 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     return out.getvalue()
 
 # =========================================================
-# 6. HTML Preview
+# 6. HTML Preview (Generated)
 # =========================================================
-def load_font_base64():
-    font_path = "NotoSansTC-Regular.ttf"
-    if os.path.exists(font_path):
-        with open(font_path, "rb") as f: return base64.b64encode(f.read()).decode("utf-8")
-    url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTF/TraditionalChinese/NotoSansTC-Regular.ttf"
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200:
-            with open(font_path, "wb") as f: f.write(r.content)
-            return base64.b64encode(r.content).decode("utf-8")
-    except: pass
-    return None
-
 def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, format_type, remarks, total_list, grand_total, budget, prod):
     header_cls = "bg-dw-head" if format_type == "Dongwu" else "bg-sh-head"
     media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
@@ -718,7 +687,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v75.3)")
+st.title("📺 媒體 Cue 表生成器 (v76.0)")
 
 st.markdown("### 1. 選擇格式")
 c1, c2 = st.columns(2)
@@ -882,14 +851,16 @@ if config:
     p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}"
     rem = get_remarks_text(sign_deadline, billing_month, payment_date)
 
+    # HTML Preview
     html_preview = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, total_list_accum, grand_total, total_budget_input, prod_cost)
     st.components.v1.html(html_preview, height=700, scrolling=True)
 
     with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
         for log in logs:
-            st.markdown(f"**{log.get('Media', 'N/A')}** - 公式: {log.get('Formula', 'N/A')}")
+            st.markdown(f"**{log.get('Media')}** - 預算: {log.get('Budget')} | 公式: {log.get('Formula')} | 執行: **{log.get('Final_Spots')}**檔")
             st.divider()
 
+    # Excel / PDF Download
     if template_bytes and rows:
         try:
             xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes, total_list_accum)
