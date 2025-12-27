@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.5")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v75.0 (Cloud Config)")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -110,27 +110,69 @@ def html_to_pdf_weasyprint(html_str):
     except Exception as e: return None, str(e)
 
 # =========================================================
-# 3. 核心資料設定 (2026)
+# 3. 核心資料設定 (雲端 Google Sheet 版)
 # =========================================================
-STORE_COUNTS = {
-    "全省": "4,437店", "北區": "1,649店", "桃竹苗": "779店", "中區": "839店", 
-    "雲嘉南": "499店", "高屏": "490店", "東區": "181店",
-    "新鮮視_全省": "3,124面", "新鮮視_北區": "1,127面", "新鮮視_桃竹苗": "616面", 
-    "新鮮視_中區": "528面", "新鮮視_雲嘉南": "365面", "新鮮視_高屏": "405面", "新鮮視_東區": "83面",
-    "家樂福_量販": "68店", "家樂福_超市": "249店"
-}
-STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
+# 您提供的 Google Sheet 連結
+GSHEET_SHARE_URL = "https://docs.google.com/spreadsheets/d/1bzmG-N8XFsj8m3LUPqA8K70AcIqaK4Qhq1VPWcK0w_s/edit?usp=sharing"
 
-PRICING_DB = {
-    "全家廣播": { "Std_Spots": 480, "Day_Part": "00:00-24:00", "全省": [400000, 320000], "北區": [250000, 200000], "桃竹苗": [150000, 120000], "中區": [150000, 120000], "雲嘉南": [100000, 80000], "高屏": [100000, 80000], "東區": [62500, 50000] },
-    "新鮮視": { "Std_Spots": 504, "Day_Part": "07:00-22:00", "全省": [150000, 120000], "北區": [150000, 120000], "桃竹苗": [120000, 96000], "中區": [90000, 72000], "雲嘉南": [75000, 60000], "高屏": [75000, 60000], "東區": [45000, 36000] },
-    "家樂福": { "量販_全省": {"List": 300000, "Net": 250000, "Std_Spots": 420, "Day_Part": "09:00-23:00"}, "超市_全省": {"List": 100000, "Net": 80000, "Std_Spots": 720, "Day_Part": "00:00-24:00"} }
-}
-SEC_FACTORS = {
-    "全家廣播": {30: 1.0, 20: 0.85, 15: 0.65, 10: 0.5, 5: 0.25},
-    "新鮮視": {30: 3.0, 20: 2.0, 15: 1.5, 10: 1.0, 5: 0.5},
-    "家樂福": {30: 1.5, 20: 1.0, 15: 0.85, 10: 0.65, 5: 0.35}
-}
+@st.cache_data(ttl=300) # 5分鐘快取，避免頻繁請求
+def load_config_from_cloud(share_url):
+    try:
+        # 解析 File ID
+        match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)
+        if not match: return None, None, None, None, "連結格式錯誤，請提供標準 Google Sheet 分享連結"
+        file_id = match.group(1)
+        
+        # 定義讀取函式 (使用 gviz API，支援指定 sheet name)
+        def read_sheet(sheet_name):
+            url = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+            # 使用 pandas 讀取 CSV
+            return pd.read_csv(url)
+
+        # 1. 載入店數 (Stores)
+        df_store = read_sheet("Stores")
+        # 簡單清理欄位名稱空格 (防呆)
+        df_store.columns = [c.strip() for c in df_store.columns]
+        store_counts = dict(zip(df_store['Key'], df_store['Display_Name']))
+        store_counts_num = dict(zip(df_store['Key'], df_store['Count']))
+
+        # 2. 載入秒數係數 (Factors)
+        df_fact = read_sheet("Factors")
+        df_fact.columns = [c.strip() for c in df_fact.columns]
+        sec_factors = {}
+        for _, row in df_fact.iterrows():
+            if row['Media'] not in sec_factors: sec_factors[row['Media']] = {}
+            sec_factors[row['Media']][int(row['Seconds'])] = float(row['Factor'])
+
+        # 3. 載入價格表 (Pricing DB)
+        df_price = read_sheet("Pricing")
+        df_price.columns = [c.strip() for c in df_price.columns]
+        pricing_db = {}
+        for _, row in df_price.iterrows():
+            m = row['Media']
+            r = row['Region']
+            if m not in pricing_db:
+                pricing_db[m] = {
+                    "Std_Spots": int(row['Std_Spots']),
+                    "Day_Part": row['Day_Part']
+                }
+            # 寫入分區價格 [List, Net]
+            pricing_db[m][r] = [int(row['List_Price']), int(row['Net_Price'])]
+            
+        return store_counts, store_counts_num, pricing_db, sec_factors, None
+
+    except Exception as e:
+        return None, None, None, None, f"讀取失敗: {str(e)}"
+
+# 執行讀取 (顯示 Spinner 讓使用者知道正在連線)
+with st.spinner("正在連線 Google Sheet 載入最新價格表..."):
+    STORE_COUNTS, STORE_COUNTS_NUM, PRICING_DB, SEC_FACTORS, err_msg = load_config_from_cloud(GSHEET_SHARE_URL)
+
+if err_msg:
+    st.error(f"❌ 設定檔載入失敗！\n\n原因: {err_msg}\n\n請確認：\n1. Google Sheet 是否有 'Pricing', 'Stores', 'Factors' 三個分頁。\n2. 共用權限是否已開啟為 **'知道連結的任何人皆可檢視'**。")
+    st.stop() # 停止程式，避免後續報錯
+
+# 固定的區域順序與秒數清單 (這兩個通常很少變，維持寫死以確保 UI 穩定)
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
 DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
@@ -164,7 +206,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.4 - Auto-National Promotion)
+# 4. 核心計算函式 (Logic v4.4)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -179,14 +221,13 @@ def calculate_plan_data(config, total_budget, days_count):
             if s_budget <= 0: continue
             
             factor = get_sec_factor(m, sec)
-            log_details = {}
             
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
-                # --- Step 1: Net 算檔次 ---
+                # Net 算檔次
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -210,7 +251,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
-                # [FIX] 使用 .get 避免 KeyError
                 debug_logs.append({
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -223,7 +263,6 @@ def calculate_plan_data(config, total_budget, days_count):
 
                 sch = calculate_schedule(spots_final, days_count)
 
-                # 計算全省打包總價 (用於合併)
                 nat_pkg_display = 0
                 if cfg["is_national"]:
                     nat_list = db["全省"][0]
@@ -231,10 +270,8 @@ def calculate_plan_data(config, total_budget, days_count):
                     nat_pkg_display = nat_unit_price * spots_final
                     total_list_accum += nat_pkg_display
 
-                # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
-                    # 分區顯示總價 (Rate = Unit * Spots)
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
                     total_rate_display = unit_rate_display * spots_final 
                     
@@ -265,7 +302,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
-                # [FIX] Log
                 debug_logs.append({
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -290,7 +326,7 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_accum, debug_logs
 
 # =========================================================
-# 5. OpenPyXL 渲染引擎 (含合併儲存格邏輯)
+# 5. OpenPyXL 渲染引擎
 # =========================================================
 SHEET_META = {
     "Dongwu": {
@@ -484,7 +520,7 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
             top_cell.value = station_title(m_key)
             apply_center_style(top_cell)
 
-        # [NEW] 合併 Package Cost (全省打包時)
+        # 合併 Package Cost (全省打包時)
         if needed > 0 and data[0].get("is_pkg_member", False):
             pkg_col = cols.get("pkg")
             if pkg_col:
@@ -510,7 +546,6 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
                 else: safe_write(ws, curr_row, cols["seconds"], int(r_data["seconds"]))
                 
                 safe_write(ws, curr_row, cols["rate"], r_data["rate_display"])
-                # 若非全省，逐行寫入 Package Cost
                 if not r_data.get("is_pkg_member", False):
                     safe_write(ws, curr_row, cols["pkg"], r_data["pkg_display"])
             else:
@@ -702,7 +737,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v74.4)")
+st.title("📺 媒體 Cue 表生成器 (v75.0)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -789,11 +824,10 @@ if is_rad:
         is_nat = st.checkbox("全省聯播", True, key="rad_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
         
-        # [NEW] 自動判斷全省邏輯 (Auto-Upgrade)
         effective_is_nat = is_nat
         if not is_nat and len(regs) == 6:
             effective_is_nat = True
-            regs = ["全省"] # 運算用
+            regs = ["全省"]
             st.info("✅ 已選滿6區，自動轉為全省聯播計價")
 
         secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
