@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.1")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.2")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -121,6 +121,7 @@ STORE_COUNTS = {
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
 
+# [List Price (顯示用), Net Price (運算用)]
 PRICING_DB = {
     "全家廣播": { "Std_Spots": 480, "Day_Part": "00:00-24:00", "全省": [400000, 320000], "北區": [250000, 200000], "桃竹苗": [150000, 120000], "中區": [150000, 120000], "雲嘉南": [100000, 80000], "高屏": [100000, 80000], "東區": [62500, 50000] },
     "新鮮視": { "Std_Spots": 504, "Day_Part": "07:00-22:00", "全省": [150000, 120000], "北區": [150000, 120000], "桃竹苗": [120000, 96000], "中區": [90000, 72000], "雲嘉南": [75000, 60000], "高屏": [75000, 60000], "東區": [45000, 36000] },
@@ -132,6 +133,8 @@ SEC_FACTORS = {
     "家樂福": {30: 1.5, 20: 1.0, 15: 0.85, 10: 0.65, 5: 0.35}
 }
 REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
+# [FIX] 補回 DURATIONS 定義
+DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
 
 REGION_DISPLAY_MAP = {
     "北區": "北區-北北基", "桃竹苗": "桃區-桃竹苗", "中區": "中區-中彰投",
@@ -173,7 +176,6 @@ def calculate_plan_data(config, total_budget, days_count):
     for m, cfg in config.items():
         m_budget_total = total_budget * (cfg["share"] / 100.0)
         
-        # [NEW] 依照秒數佔比再次分配預算
         for sec, sec_pct in cfg["sec_shares"].items():
             s_budget = m_budget_total * (sec_pct / 100.0)
             if s_budget <= 0: continue
@@ -186,7 +188,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
-                # --- Step 1: Net 算檔次 ---
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
@@ -211,7 +212,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
-                # [NEW] 詳細 Log
                 log_details = {
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -226,10 +226,9 @@ def calculate_plan_data(config, total_budget, days_count):
 
                 sch = calculate_schedule(spots_final, days_count)
 
-                # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
-                    # [關鍵修正] Rate 顯示分區「總價」
+                    # Rate 顯示分區「總價」
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
                     total_rate_display = unit_rate_display * spots_final 
                     pkg_display = total_rate_display
@@ -265,7 +264,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
-                # [NEW] 詳細 Log
                 log_details = {
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -670,7 +668,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v74.1)")
+st.title("📺 媒體 Cue 表生成器 (v74.2)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
