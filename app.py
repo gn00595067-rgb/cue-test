@@ -1,907 +1,1068 @@
-# -*- coding: utf-8 -*-
-import streamlit as st
-import math
+# cue_sheet_pro.py
+# ============================================================
+# Cue Sheet Pro - 擬真版（以 Excel 原生模板/COM 為主）
+# 核心目標：最大化還原公司範例（字型/顏色/Logo/合併格/邊框）
+#
+# 依你最終規則：
+# 1) Rate (Net) = 分區「總價」(不是單檔價)
+#    Rate = int((List/Std)*Factor) * Spots
+# 2) Spots 用 Net 算；未達標 penalty 會影響 Spots 計算
+# 3) Package-cost 顯示用：
+#    - 有選全省：顯示一格合併的打包價（全省 List 算；若未達標打包價 x1.1）
+#      分區 Rate 不做 x1.1（避免價差太大讓客戶起疑）
+#    - 沒選全省：逐列顯示；若未達標，Package-cost = round(Rate * 1.1)
+# 4) Excel 產出：優先用 win32com 操作模板，保留 logo/shape
+# 5) PDF 產出：用 Excel ExportAsFixedFormat，避免 HTML/LibreOffice 失真或出現 err
+# ============================================================
+
 import io
-from datetime import timedelta, datetime, date
+import os
+import math
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, date, timedelta
+from typing import List, Dict, Any, Optional, Tuple
 
-import xlsxwriter
+import streamlit as st
 
-# PDF (HTML -> PDF)
+# --- Optional: openpyxl fallback（非 Windows/無 Excel 時） ---
 try:
-    from weasyprint import HTML
-    WEASY_OK = True
+    import openpyxl
 except Exception:
-    WEASY_OK = False
+    openpyxl = None
+
+# --- Windows Excel COM（最擬真） ---
+HAS_EXCEL_COM = False
+try:
+    import pythoncom
+    import win32com.client as win32
+    HAS_EXCEL_COM = True
+except Exception:
+    HAS_EXCEL_COM = False
 
 
-# ==========================================
-# 1) 基礎資料與設定 (2026 新制)
-# ==========================================
+# ============================================================
+# 1) Static DB（2026 新制）
+# ============================================================
 
-STORE_COUNTS_INT = {
+REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
+
+REGION_DISPLAY = {
+    "北區": "北區-北北基",
+    "桃竹苗": "桃區-桃竹苗",
+    "中區": "中區-中彰投",
+    "雲嘉南": "雲嘉南區-雲嘉南",
+    "高屏": "高屏區-高屏",
+    "東區": "東區-宜花東",
+    "全省": "全省",
+}
+
+STORE_COUNTS = {
     "全省": 4437,
-    "北區": 1649, "桃竹苗": 779, "中區": 839, "雲嘉南": 499, "高屏": 490, "東區": 181,
+    "北區": 1649,
+    "桃竹苗": 779,
+    "中區": 839,
+    "雲嘉南": 499,
+    "高屏": 490,
+    "東區": 181,
 
+    # 新鮮視（依你給的 key）
     "新鮮視_全省": 3124,
-    "新鮮視_北區": 1127, "新鮮視_桃竹苗": 616, "新鮮視_中區": 528,
-    "新鮮視_雲嘉南": 365, "新鮮視_高屏": 405, "新鮮視_東區": 83,
+    "新鮮視_北區": 1127,
+    "新鮮視_桃竹苗": 616,
+    "新鮮視_中區": 528,
+    "新鮮視_雲嘉南": 365,
+    "新鮮視_高屏": 405,
+    "新鮮視_東區": 83,
 
+    # 家樂福
     "家樂福_量販": 68,
     "家樂福_超市": 249,
 }
 
-REGIONS_ORDER = ["北區", "桃竹苗", "中區", "雲嘉南", "高屏", "東區"]
-DURATIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
-
-# List=牌價(顯示用), Net=實收(運算用)
+# Pricing DB：
+# - List: 顯示用（價值定錨）
+# - Net : 運算用（算 spots）
 PRICING_DB = {
     "全家廣播": {
         "Std_Spots": 480,
         "Day_Part": "00:00-24:00",
-        "全省":   [400000, 320000],
-        "北區":   [250000, 200000],
+        # region: [List, Net]
+        "全省": [400000, 320000],
+        "北區": [250000, 200000],
         "桃竹苗": [150000, 120000],
-        "中區":   [150000, 120000],
-        "雲嘉南": [100000,  80000],
-        "高屏":   [100000,  80000],
-        "東區":   [ 62500,  50000],
+        "中區": [150000, 120000],
+        "雲嘉南": [100000, 80000],
+        "高屏": [100000, 80000],
+        "東區": [62500, 50000],
     },
     "新鮮視": {
         "Std_Spots": 504,
         "Day_Part": "07:00-22:00",
-        "全省":   [150000, 120000],
-        "北區":   [150000, 120000],
-        "桃竹苗": [120000,  96000],
-        "中區":   [ 90000,  72000],
-        "雲嘉南": [ 75000,  60000],
-        "高屏":   [ 75000,  60000],
-        "東區":   [ 45000,  36000],
+        "全省": [150000, 120000],
+        "北區": [150000, 120000],
+        "桃竹苗": [120000, 96000],
+        "中區": [90000, 72000],
+        "雲嘉南": [75000, 60000],
+        "高屏": [75000, 60000],
+        "東區": [45000, 36000],
     },
     "家樂福": {
         "量販_全省": {"List": 300000, "Net": 250000, "Std_Spots": 420, "Day_Part": "09:00-23:00"},
-        "超市_全省": {"List": 100000, "Net":  80000, "Std_Spots": 720, "Day_Part": "00:00-24:00"},
+        "超市_全省": {"List": 100000, "Net": 80000, "Std_Spots": 720, "Day_Part": "00:00-24:00"},
     }
 }
 
 SEC_FACTORS = {
     "全家廣播": {30: 1.0, 20: 0.85, 15: 0.65, 10: 0.5, 5: 0.25},
-    "新鮮視":   {30: 3.0, 20: 2.0,  15: 1.5,  10: 1.0, 5: 0.5},
-    "家樂福":   {30: 1.5, 20: 1.0,  15: 0.85, 10: 0.65, 5: 0.35}
+    "新鮮視":   {30: 3.0, 20: 2.0, 15: 1.5, 10: 1.0, 5: 0.5},
+    "家樂福":   {30: 1.5, 20: 1.0, 15: 0.85, 10: 0.65, 5: 0.35},
 }
 
-def get_sec_factor(media_type, seconds):
-    # 跟你範例一致：沒有對應就 1.0
-    return SEC_FACTORS.get(media_type, {}).get(seconds, 1.0)
 
-def calculate_schedule(total_spots, days):
+# ============================================================
+# 2) 基礎工具
+# ============================================================
+
+def ceil_div(a: float, b: float) -> int:
+    if b == 0:
+        return 0
+    return int(math.ceil(a / b))
+
+def evenize(n: int) -> int:
+    if n <= 0:
+        return 2
+    return n if n % 2 == 0 else n + 1
+
+def sec_factor(media: str, seconds: int) -> float:
+    return SEC_FACTORS.get(media, {}).get(seconds, 1.0)
+
+def calculate_schedule_even(total_spots: int, days: int) -> List[int]:
     """
-    Even Distribution Strategy (跟你範例一致)
-    - 強制偶數
-    - 先除2平均分，再乘2
+    偶數排程（你的 v60.x 範例策略）
+    - spots 強制偶數
+    - 先除以2 分配，再乘回2
     """
     if days <= 0:
         return []
-    if total_spots % 2 != 0:
-        total_spots += 1
+    total_spots = evenize(total_spots)
     half = total_spots // 2
-    base, rem = divmod(half, days)
-    arr = [base + (1 if i < rem else 0) for i in range(days)]
-    return [x * 2 for x in arr]
+    base = half // days
+    rem = half % days
+    arr = []
+    for i in range(days):
+        x = base + (1 if i < rem else 0)
+        arr.append(x * 2)
+    return arr
 
-def fmt_int(v):
-    try:
-        if isinstance(v, (int, float)):
-            return f"{int(round(v)):,}"
-        return str(v)
-    except:
-        return str(v)
-
-def region_display(region):
-    # 你示例的顯示
-    mp = {
-        "北區": "北區-北北基",
-        "桃竹苗": "桃區-桃竹苗",
-        "中區": "中區-中彰投",
-        "雲嘉南": "雲嘉南區-雲嘉南",
-        "高屏": "高屏區-高屏",
-        "東區": "東區-宜花東",
-        "全省量販": "全省量販",
-        "全省超市": "全省超市",
-    }
-    return mp.get(region, region)
-
-def station_name(media):
+def station_display_name(media: str) -> str:
+    # 依公司範例的 Station 換行寫法
     if media == "全家廣播":
-        return "全家便利商店<br>通路廣播廣告"
+        return "全家便利商店\n通路廣播廣告"
     if media == "新鮮視":
-        return "全家便利商店<br>新鮮視廣告"
-    return "家樂福"
+        return "全家便利商店\n新鮮視廣告"
+    if media == "家樂福":
+        return "家樂福"
+    return media
+
+def size_display(media: str, seconds: int) -> str:
+    # 公司範例多用 "20秒"
+    return f"{seconds}秒"
+
+def program_display(media: str, region: str) -> str:
+    if media == "新鮮視":
+        key = f"新鮮視_{region}"
+        v = STORE_COUNTS.get(key, 0)
+        return f"{v:,}"
+    if media == "全家廣播":
+        v = STORE_COUNTS.get(region, 0)
+        return f"{v:,}"
+    if media == "家樂福":
+        if region == "全省量販":
+            return f"{STORE_COUNTS.get('家樂福_量販', 0):,}"
+        if region == "全省超市":
+            return f"{STORE_COUNTS.get('家樂福_超市', 0):,}"
+    return "0"
 
 
-# ==========================================
-# 2) 核心計算（完全對齊你範例的 group + merge 概念）
-# ==========================================
+# ============================================================
+# 3) 核心運算（Spots）
+# ============================================================
 
-def calc_radio_or_fv_rows(media, cfg, sec, sec_budget, days_count):
+@dataclass
+class RowOut:
+    media: str
+    seconds: int
+    is_national: bool
+    region: str
+    location: str
+    program: str
+    daypart: str
+    rate_total: Any     # int or str like "計量販"
+    package_val: Any    # int or str, per-row (或合併時只有第一列有值)
+    schedule: List[int]
+    spots: int
+
+@dataclass
+class GroupOut:
+    media: str
+    seconds: int
+    is_national: bool
+    under_target: bool
+    spots: int
+    rows: List[RowOut]
+    package_merged: bool
+    package_merged_value: Optional[int]  # only if merged
+
+
+def calc_spots_for_media(media: str, seconds: int, budget_alloc: float, regions_calc: List[str]) -> Tuple[int, bool]:
     """
-    回傳 rows (每分區一列) + group_bundle_pkg (全省時才有) + group_penalty
-    你最新規則：
-    - Rate(Net) 顯示「分區總價」(List 算) = unit_list * spots
-    - Package-cost(Net):
-        * 全省：表格中只顯示一次（合併格），數值用「全省 List」算打包價，未達標 *1.1
-              分區列不要 *1.1（避免太怪）
-        * 非全省：每列 Package = Rate * (1.1 if penalty)
+    用 Net 算 spots：
+    UnitCost(Net) = sum_over_regions (Net/Std)*Factor
+    Spots_init = ceil(budget / UnitCost)
+    under_target = Spots_init < Std
+    Spots_final = ceil(budget / (UnitCost*(1.1 if under_target else 1)))
+    Spots_final -> 偶數
     """
-    db = PRICING_DB[media]
-    std = db["Std_Spots"]
-    factor = get_sec_factor(media, sec)
-    day_part = db["Day_Part"]
+    factor = sec_factor(media, seconds)
 
-    is_national = bool(cfg.get("is_national", False))
-    selected_regions = cfg.get("regions", [])
+    if media in ["全家廣播", "新鮮視"]:
+        db = PRICING_DB[media]
+        std = db["Std_Spots"]
 
-    if is_national:
-        calc_regions = ["全省"]         # 內部算檔次只用全省 Net（跟你範例一致）
-        display_regions = REGIONS_ORDER[:]  # 但表格一定展開 6 區
-    else:
-        calc_regions = selected_regions[:]  # 內部算檔次用選到的區
-        display_regions = selected_regions[:]  # 表格只顯示選到的區
+        unit_sum = 0.0
+        for r in regions_calc:
+            net_price = db[r][1]
+            unit_sum += (net_price / std) * factor
 
-    if not display_regions:
-        return [], None, False, None  # 沒選分區就不產生
+        spots_init = ceil_div(budget_alloc, unit_sum)
+        under = spots_init < std
+        mult = 1.1 if under else 1.0
+        spots_final = ceil_div(budget_alloc, unit_sum * mult)
+        spots_final = evenize(spots_final)
+        return spots_final, under
 
-    # Step A: Net 算 spots
-    unit_net_sum = 0.0
-    for reg in calc_regions:
-        net_price = db[reg][1]
-        unit_net_sum += (net_price / std) * factor
+    if media == "家樂福":
+        # 用量販 Net 算 spots，超市用比例換算 spots
+        db = PRICING_DB["家樂福"]
+        base = db["量販_全省"]
+        std = base["Std_Spots"]
+        unit = (base["Net"] / std) * factor
 
-    if unit_net_sum <= 0:
-        return [], None, False, None
+        spots_init = ceil_div(budget_alloc, unit)
+        under = spots_init < std
+        mult = 1.1 if under else 1.0
+        spots_final = ceil_div(budget_alloc, unit * mult)
+        spots_final = evenize(spots_final)
+        return spots_final, under
 
-    spots_init = math.ceil(sec_budget / unit_net_sum)
-    penalty = spots_init < std
-    mult = 1.1 if penalty else 1.0
-
-    spots = math.ceil(sec_budget / (unit_net_sum * mult))
-    if spots % 2 != 0:
-        spots += 1
-    if spots <= 0:
-        spots = 2
-
-    sch = calculate_schedule(spots, days_count)
-
-    # Step B: List 填表
-    rows = []
-    bundle_pkg = None
-
-    # 全省打包價（只在全省時顯示一次，且可 *1.1）
-    if is_national:
-        nat_list = db["全省"][0]
-        unit_list_nat = int((nat_list / std) * factor)
-        bundle_pkg = unit_list_nat * spots
-        if penalty:
-            bundle_pkg = int(round(bundle_pkg * 1.1))
-
-    for idx, reg in enumerate(display_regions):
-        # 分區顯示用 List
-        reg_list = db[reg][0]  # 全省情境下也要用分區 List（你規格書的欺敵邏輯）
-        unit_list_reg = int((reg_list / std) * factor)
-
-        # ✅ Rate(Net) = 分區總價
-        rate_total = unit_list_reg * spots
-
-        # ✅ Package-cost(Net)
-        if is_national:
-            # 全省時：分區列不要 *1.1（避免價差過度）
-            pkg_display = None  # 讓 renderer 用 merge cell 顯示 bundle_pkg
-        else:
-            pkg_display = int(round(rate_total * (1.1 if penalty else 1.0)))
-
-        # program
-        if media == "新鮮視":
-            prog = STORE_COUNTS_INT.get(f"新鮮視_{reg}", 0)
-        else:
-            prog = STORE_COUNTS_INT.get(reg, 0)
-
-        rows.append({
-            "media": media,
-            "seconds": sec,
-            "region": reg,
-            "location": region_display(reg),
-            "program": prog,
-            "daypart": day_part,
-            "schedule": sch,
-            "spots": spots,
-
-            "rate_total": rate_total,      # G 欄（總價）
-            "pkg_display": pkg_display,    # H 欄（非全省時逐列顯示；全省時 None）
-            "is_national": is_national,
-            "penalty": penalty,
-
-            # renderer 用：全省時在該 group 第1列放合併格
-            "is_pkg_start": (is_national and idx == 0),
-            "is_pkg_member": is_national,
-            "bundle_pkg": bundle_pkg,
-        })
-
-    return rows, bundle_pkg, penalty, spots
+    return 0, False
 
 
-def calc_carrefour_rows(cfg, sec, sec_budget, days_count):
-    """
-    家樂福：你範例做法
-    - spots 用量販 Net/Std 算（未達標 *1.1）
-    - 量販列顯示 List -> Rate & Package
-    - 超市列顯示「計量販」
-    """
-    db = PRICING_DB["家樂福"]
-    factor = get_sec_factor("家樂福", sec)
+def build_groups(
+    total_budget_net: int,
+    start_dt: date,
+    end_dt: date,
+    config_media: Dict[str, Dict[str, Any]],
+) -> Tuple[List[GroupOut], Dict[str, Any]]:
+    days = (end_dt - start_dt).days + 1
+    if days <= 0:
+        return [], {"days": 0}
 
-    base = db["量販_全省"]
-    sup  = db["超市_全省"]
+    groups: List[GroupOut] = []
+    debug = []
 
-    std_base = base["Std_Spots"]
-    std_sup  = sup["Std_Spots"]
-
-    unit_net = (base["Net"] / std_base) * factor
-    if unit_net <= 0:
-        return [], None, False, None
-
-    spots_init = math.ceil(sec_budget / unit_net)
-    penalty = spots_init < std_base
-    mult = 1.1 if penalty else 1.0
-
-    spots = math.ceil(sec_budget / (unit_net * mult))
-    if spots % 2 != 0:
-        spots += 1
-    if spots <= 0:
-        spots = 2
-
-    sch_base = calculate_schedule(spots, days_count)
-
-    unit_list_base = int((base["List"] / std_base) * factor)
-    rate_total_base = unit_list_base * spots
-    pkg_total_base  = int(round(rate_total_base * (1.1 if penalty else 1.0)))  # 家樂福照你範例：逐列顯示
-
-    rows = [{
-        "media": "家樂福",
-        "seconds": sec,
-        "region": "全省量販",
-        "location": "全省量販",
-        "program": STORE_COUNTS_INT.get("家樂福_量販", 0),
-        "daypart": base["Day_Part"],
-        "schedule": sch_base,
-        "spots": spots,
-        "rate_total": rate_total_base,
-        "pkg_display": pkg_total_base,
-        "is_national": True,
-        "penalty": penalty,
-        "is_pkg_start": False,
-        "is_pkg_member": False,
-        "bundle_pkg": None,
-    }]
-
-    # 超市 spots 比例換算
-    spots_sup = int(round(spots * (std_sup / std_base)))
-    if spots_sup % 2 != 0:
-        spots_sup += 1
-    sch_sup = calculate_schedule(spots_sup, days_count)
-    rows.append({
-        "media": "家樂福",
-        "seconds": sec,
-        "region": "全省超市",
-        "location": "全省超市",
-        "program": STORE_COUNTS_INT.get("家樂福_超市", 0),
-        "daypart": sup["Day_Part"],
-        "schedule": sch_sup,
-        "spots": spots_sup,
-        "rate_total": "計量販",
-        "pkg_display": "計量販",
-        "is_national": True,
-        "penalty": penalty,
-        "is_pkg_start": False,
-        "is_pkg_member": False,
-        "bundle_pkg": None,
-    })
-    return rows, None, penalty, spots
-
-
-def build_final_rows(config_media, total_budget, days_count):
-    final_rows = []
-    debug_logs = []
-
-    # 用來算 Total Package：全省 group 的 bundle 只加一次
-    bundle_seen = set()
-    total_pkg = 0
-    total_rate = 0
-
+    # 依 share 分配預算
     for media, cfg in config_media.items():
-        media_budget = total_budget * (cfg["share"] / 100.0)
+        media_budget = total_budget_net * (cfg["share"] / 100.0)
+        if media_budget <= 0:
+            continue
+
         for sec, sec_share in cfg["sec_shares"].items():
             sec_budget = media_budget * (sec_share / 100.0)
             if sec_budget <= 0:
                 continue
 
             if media in ["全家廣播", "新鮮視"]:
-                rows, bundle_pkg, penalty, spots = calc_radio_or_fv_rows(media, cfg, sec, sec_budget, days_count)
-                if not rows:
-                    continue
-                final_rows.extend(rows)
+                is_nat = cfg["is_national"]
+                # 計算用 regions：全省 -> ["全省"]；分區 -> 選到的那些
+                regions_calc = ["全省"] if is_nat else cfg["regions"]
+                # 顯示用 regions：全省 -> 展開 6 區；分區 -> 只顯示選到的
+                regions_display = REGIONS_ORDER if is_nat else cfg["regions"]
 
-                # debug
+                spots, under = calc_spots_for_media(media, sec, sec_budget, regions_calc)
+                daypart = PRICING_DB[media]["Day_Part"]
+                factor = sec_factor(media, sec)
                 std = PRICING_DB[media]["Std_Spots"]
-                debug_logs.append({
+
+                schedule = calculate_schedule_even(spots, days)
+
+                rows: List[RowOut] = []
+
+                # Rate (Net) = 分區總價（用 List/Std*Factor 取 int 後乘 spots）
+                # 注意：Rate 不做 x1.1（跟你附的 Cue_萬國通路 範例一致）
+                for r in regions_display:
+                    list_price = PRICING_DB[media][r][0] if not is_nat else PRICING_DB[media][r][0]
+                    unit_list_int = int((list_price / std) * factor)
+                    rate_total = unit_list_int * spots
+
+                    # Package-cost：
+                    # - 全省：要做合併格，per-row 先留空（只在第一列放 merged value）
+                    # - 分區：逐列顯示；若未達標 package = round(rate * 1.1)
+                    if is_nat:
+                        pkg_val = None
+                    else:
+                        pkg_val = int(round(rate_total * (1.1 if under else 1.0)))
+
+                    rows.append(RowOut(
+                        media=media,
+                        seconds=sec,
+                        is_national=is_nat,
+                        region=r,
+                        location=REGION_DISPLAY.get(r, r),
+                        program=program_display(media, r),
+                        daypart=daypart,
+                        rate_total=rate_total,
+                        package_val=pkg_val,
+                        schedule=schedule,
+                        spots=spots
+                    ))
+
+                # 全省打包價（Package-cost 合併格）
+                package_merged = is_nat
+                package_merged_value = None
+                if is_nat:
+                    nat_list = PRICING_DB[media]["全省"][0]
+                    unit_nat = int((nat_list / std) * factor)
+                    base_pkg = unit_nat * spots
+                    # 你的特例：全省時，未達標 -> 打包價要 x1.1；分區價不要 x1.1
+                    package_merged_value = int(round(base_pkg * (1.1 if under else 1.0)))
+                    # 把第一列 package_val 填入，後面靠 merge
+                    if rows:
+                        rows[0].package_val = package_merged_value
+
+                groups.append(GroupOut(
+                    media=media,
+                    seconds=sec,
+                    is_national=is_nat,
+                    under_target=under,
+                    spots=spots,
+                    rows=rows,
+                    package_merged=package_merged,
+                    package_merged_value=package_merged_value
+                ))
+
+                debug.append({
                     "media": media, "sec": sec, "budget": sec_budget,
-                    "spots": spots, "std": std, "penalty": penalty,
-                    "is_national": cfg.get("is_national", False),
-                    "reason": "觸發 x1.1" if penalty else "費率正常"
+                    "spots": spots, "std": std, "under": under, "factor": factor,
+                    "is_national": is_nat
                 })
 
             elif media == "家樂福":
-                rows, bundle_pkg, penalty, spots = calc_carrefour_rows(cfg, sec, sec_budget, days_count)
-                if not rows:
-                    continue
-                final_rows.extend(rows)
-                debug_logs.append({
-                    "media": media, "sec": sec, "budget": sec_budget,
-                    "spots": spots, "std": PRICING_DB["家樂福"]["量販_全省"]["Std_Spots"],
-                    "penalty": penalty, "is_national": True,
-                    "reason": "觸發 x1.1" if penalty else "費率正常"
+                # 家樂福：只有全省，但含量販/超市兩列
+                spots_base, under = calc_spots_for_media("家樂福", sec, sec_budget, ["全省"])
+
+                db = PRICING_DB["家樂福"]
+                base = db["量販_全省"]
+                sup = db["超市_全省"]
+                factor = sec_factor("家樂福", sec)
+
+                sch_base = calculate_schedule_even(spots_base, days)
+
+                # 量販：Rate = int((List/Std)*Factor) * spots
+                unit_list_int = int((base["List"] / base["Std_Spots"]) * factor)
+                rate_total = unit_list_int * spots_base
+                pkg_val = int(round(rate_total * (1.1 if under else 1.0)))
+
+                row_base = RowOut(
+                    media="家樂福",
+                    seconds=sec,
+                    is_national=True,
+                    region="全省量販",
+                    location="全省量販",
+                    program=program_display("家樂福", "全省量販"),
+                    daypart=base["Day_Part"],
+                    rate_total=rate_total,
+                    package_val=pkg_val,
+                    schedule=sch_base,
+                    spots=spots_base
+                )
+
+                # 超市：公司範例顯示「計量販」
+                spots_sup = int(round(spots_base * (sup["Std_Spots"] / base["Std_Spots"])))
+                spots_sup = evenize(spots_sup)
+                sch_sup = calculate_schedule_even(spots_sup, days)
+
+                row_sup = RowOut(
+                    media="家樂福",
+                    seconds=sec,
+                    is_national=True,
+                    region="全省超市",
+                    location="全省超市",
+                    program=program_display("家樂福", "全省超市"),
+                    daypart=sup["Day_Part"],
+                    rate_total="計量販",
+                    package_val="計量販",
+                    schedule=sch_sup,
+                    spots=spots_sup
+                )
+
+                groups.append(GroupOut(
+                    media="家樂福",
+                    seconds=sec,
+                    is_national=True,
+                    under_target=under,
+                    spots=spots_base,
+                    rows=[row_base, row_sup],
+                    package_merged=False,
+                    package_merged_value=None
+                ))
+
+                debug.append({
+                    "media": "家樂福", "sec": sec, "budget": sec_budget,
+                    "spots": spots_base, "std": base["Std_Spots"], "under": under, "factor": factor,
+                    "is_national": True
                 })
 
-    # 排序：媒體->秒數->區域
-    media_order = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
-    region_rank = {r: i for i, r in enumerate(REGIONS_ORDER)}
-    def rr(x):
-        if x["region"] in region_rank:
-            return region_rank[x["region"]]
-        if x["region"] == "全省量販":
-            return 90
-        if x["region"] == "全省超市":
-            return 91
-        return 999
+    # 排序：全家廣播 -> 新鮮視 -> 家樂福；秒數小到大
+    media_rank = {"全家廣播": 1, "新鮮視": 2, "家樂福": 3}
+    groups.sort(key=lambda g: (media_rank.get(g.media, 99), g.seconds))
 
-    final_rows.sort(key=lambda x: (media_order.get(x["media"], 99), x["seconds"], rr(x)))
-
-    # Total Rate / Total Package
-    # - Rate：所有 int 的 rate_total 加總
-    total_rate = sum([r["rate_total"] for r in final_rows if isinstance(r["rate_total"], int)])
-
-    # - Package：
-    #   * 全省 group：bundle_pkg 加一次
-    #   * 非全省：逐列 pkg_display 加總
-    for r in final_rows:
-        if r.get("is_national") and r.get("bundle_pkg") is not None and r.get("is_pkg_start"):
-            key = (r["media"], r["seconds"])
-            if key not in bundle_seen:
-                bundle_seen.add(key)
-                total_pkg += int(r["bundle_pkg"])
-        elif (not r.get("is_pkg_member")) and isinstance(r.get("pkg_display"), int):
-            total_pkg += int(r["pkg_display"])
-
-    return final_rows, debug_logs, total_rate, total_pkg
+    meta = {
+        "days": days,
+        "debug": debug
+    }
+    return groups, meta
 
 
-# ==========================================
-# 3) HTML 預覽（rowspan 擬真）
-# ==========================================
+# ============================================================
+# 4) Excel COM：用「公司範例模板」填值 + 匯出 PDF
+# ============================================================
 
-def generate_html_preview(rows, days_cnt, start_dt, end_dt, client_name, product_str, total_rate, total_pkg, budget, prod_cost):
-    used_media = sorted(list(set(r["media"] for r in rows)), key=lambda x: {"全家廣播":1,"新鮮視":2,"家樂福":3}.get(x,99))
-    mediums_str = "、".join(used_media)
-
-    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
-    curr = start_dt
-    date_row1 = f"<th class='header-blue' colspan='{days_cnt}'>{start_dt.month}月</th>"
-    date_row2 = ""
-    date_row3 = ""
-    for i in range(days_cnt):
-        wd = curr.weekday()
-        cls = "header-yellow" if wd >= 5 else "header-blue"
-        date_row2 += f"<th class='{cls}'>{curr.day}</th>"
-        date_row3 += f"<th class='{cls}'>{weekdays[wd]}</th>"
-        curr += timedelta(days=1)
-
-    css = """
-    <style>
-      .preview-wrap { width:100%; overflow-x:auto; }
-      table.preview { border-collapse:collapse; font-family:"Microsoft JhengHei","Arial",sans-serif; font-size:13px; min-width:1200px; background:#fff; }
-      th, td { border:1px solid #555; padding:6px 8px; text-align:center; vertical-align:middle; white-space:nowrap; }
-      .header-blue { background:#2c3e50; color:#fff; font-weight:bold; }
-      .header-yellow { background:#f1c40f; color:#000; font-weight:bold; }
-      .cell-yellow { background:#fff3cd; font-weight:bold; }
-      .row-total { background:#d4edda; font-weight:bold; }
-      .row-grand { background:#ffc107; font-weight:bold; border-top:2px solid #000; }
-      .left { text-align:left; white-space:normal; }
-      .right { text-align:right; }
-      tr:nth-child(even) { background:#f2f2f2; }
-      tr:hover { background:#e6f7ff; }
-    </style>
+def excel_com_generate_from_template(
+    template_path: str,
+    client_name: str,
+    products_str: str,
+    start_dt: date,
+    end_dt: date,
+    groups: List[GroupOut],
+    production_fee: int,
+    budget_net: int
+) -> Tuple[bytes, bytes]:
     """
+    直接用 Excel COM 打開模板，填寫資料、維持格式、輸出 xlsx + pdf bytes
+    """
+    pythoncom.CoInitialize()
+    excel = win32.DispatchEx("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
 
-    # group by (media, seconds) for rowspan station & (national) package-cost
-    data_rows_html = ""
-    i = 0
-    while i < len(rows):
-        row = rows[i]
-        j = i + 1
-        while j < len(rows) and rows[j]["media"] == row["media"] and rows[j]["seconds"] == row["seconds"]:
-            j += 1
-        group = rows[i:j]
-        group_size = len(group)
+    tmp_dir = tempfile.mkdtemp(prefix="cue_sheet_")
+    out_xlsx = os.path.join(tmp_dir, f"Cue_{client_name}.xlsx")
+    out_pdf = os.path.join(tmp_dir, f"Cue_{client_name}.pdf")
 
-        station_html = station_name(row["media"])
+    try:
+        wb = excel.Workbooks.Open(os.path.abspath(template_path))
+        ws = wb.Worksheets(1)  # 你給的公司範例是第一張
 
-        for k, r in enumerate(group):
-            tr = "<tr>"
-            if k == 0:
-                tr += f"<td rowspan='{group_size}' class='left'>{station_html}</td>"
+        # --- 1) 寫入 Header 區（依 Cue_萬國通路 範例格）---
+        # A3 客戶名稱：, B3 value
+        ws.Range("B3").Value = client_name
+        ws.Range("B4").Value = products_str
+        ws.Range("B5").Value = f"{start_dt.strftime('%Y.%m.%d')} - {end_dt.strftime('%Y.%m.%d')}"
+        # Medium（依 groups 用到的 media）
+        used_media = []
+        for g in groups:
+            if g.media not in used_media:
+                used_media.append(g.media)
+        ws.Range("B6").Value = "、".join(used_media)
 
-            tr += f"<td>{r['location']}</td>"
-            tr += f"<td class='right'>{fmt_int(r['program'])}</td>"
-            tr += f"<td>{r['daypart']}</td>"
-            tr += f"<td>{r['seconds']}秒</td>"
+        # --- 2) 日期表頭（模板最多 31 天，從 H 欄開始）---
+        days = (end_dt - start_dt).days + 1
+        if days > 31:
+            raise ValueError("此模板最多支援 31 天（公司範例格式）。若要跨月或>31天，需要你同意我重刻模板。")
 
-            # Rate(Net) = 總價
-            rate_disp = fmt_int(r["rate_total"])
-            tr += f"<td class='right'>{rate_disp}</td>"
+        # 公司範例：第 8 列是「日期數字」、第 9 列是「週」
+        day_num_row = 8
+        weekday_row = 9
+        day_start_col = 8  # H
+        weekdays = ["一", "二", "三", "四", "五", "六", "日"]
 
-            # Package-cost(Net)
-            if r.get("is_pkg_start") and r.get("bundle_pkg") is not None:
-                # 全省：整段合併
-                tr += f"<td rowspan='{group_size}' class='right'>{fmt_int(r['bundle_pkg'])}</td>"
-            elif r.get("is_pkg_member"):
-                # 全省 group 的其他列不畫 package cell
-                pass
+        cur = start_dt
+        for i in range(31):
+            c = day_start_col + i
+            if i < days:
+                ws.Cells(day_num_row, c).Value = cur.day
+                ws.Cells(weekday_row, c).Value = weekdays[cur.weekday()]
+                cur += timedelta(days=1)
             else:
-                tr += f"<td class='right'>{fmt_int(r.get('pkg_display',''))}</td>"
+                ws.Cells(day_num_row, c).Value = ""
+                ws.Cells(weekday_row, c).Value = ""
 
-            # schedule days
-            sch = r.get("schedule", [])
-            for d in sch[:days_cnt]:
-                tr += f"<td>{fmt_int(d)}</td>"
+        # 檔次欄（AM=39）固定不動
+        spots_col = 39
 
-            tr += f"<td class='cell-yellow'>{fmt_int(sum(sch[:days_cnt]))}</td>"
-            tr += "</tr>"
-            data_rows_html += tr
+        # --- 3) 找到資料起始列/Total 列（依公司範例：Station header 在第 9 列）---
+        header_row = 9
+        data_start_row = 10
 
-        i = j
-
-    # total row schedule
-    totals = [0]*days_cnt
-    for r in rows:
-        sch = r.get("schedule", [])
-        for idx in range(min(days_cnt, len(sch))):
-            totals[idx] += sch[idx]
-
-    vat = int(round((budget + prod_cost) * 0.05))
-    grand = budget + prod_cost + vat
-
-    html = f"""
-    {css}
-    <div class="preview-wrap">
-      <table class="preview">
-        <tr>
-          <td colspan="5" class="left" style="background:#fff; border:none;">
-            <b>客戶名稱：</b>{client_name}<br>
-            <b>Product：</b>{product_str}<br>
-            <b>Period：</b>{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y. %m. %d')}<br>
-            <b>Medium：</b>{mediums_str}
-          </td>
-          <td colspan="{days_cnt+3}" style="background:#fff; border:none;"></td>
-        </tr>
-
-        <tr><th colspan="7" style="border:none;"></th>{date_row1}<th style="border:none;"></th></tr>
-        <tr>
-          <th rowspan="2" class="header-blue">Station</th>
-          <th rowspan="2" class="header-blue">Location</th>
-          <th rowspan="2" class="header-blue">Program</th>
-          <th rowspan="2" class="header-blue">Day-part</th>
-          <th rowspan="2" class="header-blue">Size</th>
-          <th rowspan="2" class="header-blue">Rate<br>(Net)</th>
-          <th rowspan="2" class="header-blue">Package-cost<br>(Net)</th>
-          {date_row2}
-          <th rowspan="2" class="header-blue">檔次</th>
-        </tr>
-        <tr>{date_row3}</tr>
-
-        {data_rows_html}
-
-        <tr class="row-total">
-          <td colspan="5" class="right">Total</td>
-          <td class="right">{fmt_int(total_rate)}</td>
-          <td class="right">{fmt_int(total_pkg)}</td>
-          {"".join([f"<td>{fmt_int(x)}</td>" for x in totals])}
-          <td class="cell-yellow">{fmt_int(sum(totals))}</td>
-        </tr>
-
-        <tr><td colspan="6" class="right">製作</td><td class="right">{fmt_int(prod_cost)}</td><td colspan="{days_cnt+1}"></td></tr>
-        <tr><td colspan="6" class="right">專案優惠價 (Budget)</td><td class="right" style="color:red; font-weight:bold;">{fmt_int(budget)}</td><td colspan="{days_cnt+1}"></td></tr>
-        <tr><td colspan="6" class="right">5% VAT</td><td class="right">{fmt_int(vat)}</td><td colspan="{days_cnt+1}"></td></tr>
-        <tr class="row-grand"><td colspan="6" class="right">Grand Total</td><td class="right">{fmt_int(grand)}</td><td colspan="{days_cnt+1}"></td></tr>
-      </table>
-    </div>
-    """
-    return html
-
-
-# ==========================================
-# 4) Excel (xlsxwriter) 產出（用 merge_range 擬真）
-# ==========================================
-
-def generate_excel(rows, days_cnt, start_dt, end_dt, client_name, product_str, total_rate, total_pkg, budget, prod_cost):
-    used_media = sorted(list(set(r["media"] for r in rows)), key=lambda x: {"全家廣播":1,"新鮮視":2,"家樂福":3}.get(x,99))
-    mediums = "、".join(used_media)
-
-    output = io.BytesIO()
-    wb = xlsxwriter.Workbook(output, {'in_memory': True})
-    ws = wb.add_worksheet("Media Schedule")
-
-    # formats
-    fmt_title = wb.add_format({'font_size': 18, 'bold': True, 'align': 'center'})
-    fmt_info = wb.add_format({'align': 'left', 'valign': 'top', 'bold': True})
-    fmt_head = wb.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'border': 1,
-                              'bg_color': '#4472C4', 'font_color': 'white', 'text_wrap': True, 'font_size': 10})
-    fmt_date_wk = wb.add_format({'font_size': 9, 'align': 'center', 'valign': 'vcenter', 'border': 1,
-                                 'bg_color': '#4472C4', 'font_color': 'white'})
-    fmt_date_we = wb.add_format({'font_size': 9, 'align': 'center', 'valign': 'vcenter', 'border': 1,
-                                 'bg_color': '#FFD966'})
-    fmt_cell = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 10})
-    fmt_left = wb.add_format({'align': 'left', 'valign': 'vcenter', 'border': 1, 'font_size': 10, 'text_wrap': True})
-    fmt_num = wb.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'num_format': '#,##0', 'font_size': 10})
-    fmt_spots = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bold': True,
-                               'bg_color': '#FFF2CC', 'font_size': 10})
-    fmt_total = wb.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True,
-                               'bg_color': '#E2EFDA', 'num_format': '#,##0', 'font_size': 10})
-    fmt_discount = wb.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True,
-                                  'font_color': 'red', 'num_format': '#,##0', 'font_size': 10})
-    fmt_grand = wb.add_format({'align': 'right', 'valign': 'vcenter', 'border': 1, 'bold': True,
-                               'bg_color': '#FFC107', 'num_format': '#,##0', 'font_size': 10})
-
-    # title
-    # A1:?? 依 days_cnt 動態
-    last_col = 7 + days_cnt  # 0-based: Station~Package=6, days start at 7, last is 7+days-1, spots at 7+days
-    ws.merge_range(0, 0, 0, last_col, "Media Schedule", fmt_title)
-
-    # info
-    info = [
-        ("客戶名稱：", client_name),
-        ("Product：", product_str),
-        ("Period：", f"{start_dt.strftime('%Y. %m. %d')} - {end_dt.strftime('%Y. %m. %d')}"),
-        ("Medium：", mediums),
-    ]
-    for idx, (k, v) in enumerate(info):
-        ws.write(2 + idx, 0, k, fmt_info)
-        ws.write(2 + idx, 1, v, fmt_info)
-
-    # month header
-    ws.write(6, 6, f"{start_dt.month}月", fmt_cell)
-
-    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
-    curr = start_dt
-    for i in range(days_cnt):
-        col_idx = 7 + i
-        wd = curr.weekday()
-        fmt = fmt_date_we if wd >= 5 else fmt_date_wk
-        ws.write(7, col_idx, curr.day, fmt)
-        ws.write(8, col_idx, weekdays[wd], fmt)
-        curr += timedelta(days=1)
-
-    # headers row
-    headers = ["Station", "Location", "Program", "Day-part", "Size", "Rate\n(Net)", "Package-cost\n(Net)"]
-    for c, h in enumerate(headers):
-        ws.write(8, c, h, fmt_head)
-    ws.write(8, last_col, "檔次", fmt_head)
-
-    # data rows with group merge
-    current_row = 9
-    i = 0
-    while i < len(rows):
-        row = rows[i]
-        j = i + 1
-        while j < len(rows) and rows[j]["media"] == row["media"] and rows[j]["seconds"] == row["seconds"]:
-            j += 1
-        group = rows[i:j]
-        group_size = len(group)
-
-        # Station merge per group
-        station_txt = station_name(row["media"]).replace("<br>", "\n")
-        if group_size > 1:
-            ws.merge_range(current_row, 0, current_row + group_size - 1, 0, station_txt, fmt_left)
-        else:
-            ws.write(current_row, 0, station_txt, fmt_left)
-
-        # Package merge if national (bundle)
-        # 找 is_pkg_start 的那一列
-        bundle_val = None
-        for r in group:
-            if r.get("is_pkg_start") and r.get("bundle_pkg") is not None:
-                bundle_val = r["bundle_pkg"]
+        # Total 字樣在 E 欄（公司範例）
+        total_row = None
+        used_rows = ws.UsedRange.Rows.Count
+        # 從 data_start_row 往下找 "Total"
+        for r in range(data_start_row, data_start_row + 400):
+            if str(ws.Cells(r, 5).Value).strip() == "Total":
+                total_row = r
                 break
-        if bundle_val is not None:
-            # merge H column (index 6)
-            if group_size > 1:
-                ws.merge_range(current_row, 6, current_row + group_size - 1, 6, bundle_val, fmt_num)
-            else:
-                ws.write(current_row, 6, bundle_val, fmt_num)
+        if total_row is None:
+            raise RuntimeError("找不到 Total 列（模板結構與公司範例不一致）。請改用公司範例 xlsx 當模板。")
 
-        # fill group rows
-        for k, r in enumerate(group):
-            rr = current_row + k
-            ws.write(rr, 1, r["location"], fmt_cell)
-            ws.write(rr, 2, r["program"], fmt_num)
-            ws.write(rr, 3, r["daypart"], fmt_cell)
-            ws.write(rr, 4, f"{r['seconds']}秒", fmt_cell)
+        # --- 4) 計算需要的資料列數 ---
+        flat_rows: List[RowOut] = []
+        group_spans: List[Tuple[int, int, GroupOut]] = []  # (start_index, end_index, group)
+        idx = 0
+        for g in groups:
+            start_i = idx
+            for r in g.rows:
+                flat_rows.append(r)
+                idx += 1
+            end_i = idx - 1
+            group_spans.append((start_i, end_i, g))
 
-            # rate
-            if isinstance(r["rate_total"], int):
-                ws.write(rr, 5, r["rate_total"], fmt_num)
-            else:
-                ws.write(rr, 5, r["rate_total"], fmt_cell)
+        new_n = len(flat_rows)
+        old_n = total_row - data_start_row
 
-            # package (non-national only)
-            if bundle_val is None:
-                v = r.get("pkg_display", "")
-                if isinstance(v, int):
-                    ws.write(rr, 6, v, fmt_num)
-                else:
-                    ws.write(rr, 6, v, fmt_cell)
-            else:
-                # national group other rows skip column 6
+        # --- 5) 先把 data 區的 merge 解除（避免殘留合併造成錯位）---
+        # 只解除資料區內的 merges（A~AM）
+        def unmerge_in_rect(r1, c1, r2, c2):
+            mr = ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
+            # MergeCells 可能是 True/False；要取 Areas
+            try:
+                if mr.MergeCells:
+                    mr.UnMerge()
+            except Exception:
                 pass
 
-            # schedule
-            sch = r.get("schedule", [])
-            for d_idx, s_val in enumerate(sch[:days_cnt]):
-                ws.write(rr, 7 + d_idx, s_val, fmt_cell)
+        # 比較安全做法：掃 usedrange 的 MergeCells.Areas
+        try:
+            mrange = ws.UsedRange.MergeCells
+            if mrange:
+                for area in mrange.Areas:
+                    ar1 = area.Row
+                    ac1 = area.Column
+                    ar2 = ar1 + area.Rows.Count - 1
+                    ac2 = ac1 + area.Columns.Count - 1
+                    # 若 area 與資料區相交，解除合併
+                    if not (ar2 < data_start_row or ar1 > total_row - 1 or ac2 < 1 or ac1 > spots_col):
+                        area.UnMerge()
+        except Exception:
+            # 不致命：繼續
+            pass
 
-            ws.write(rr, last_col, sum(sch[:days_cnt]), fmt_spots)
+        # --- 6) 增減列數（在 Total 上方插入/刪除）並複製格式 ---
+        # 用模板中 data_start_row 那一列當格式來源
+        fmt_src_row = data_start_row
 
-        current_row += group_size
-        i = j
+        if new_n > old_n:
+            insert_cnt = new_n - old_n
+            # 在 total_row 插入 insert_cnt 列
+            ws.Rows(total_row).Resize(insert_cnt).Insert()
+            # 把新插入列的格式複製成跟 fmt_src_row 一樣
+            for k in range(insert_cnt):
+                target_row = total_row + k
+                ws.Rows(fmt_src_row).Copy()
+                ws.Rows(target_row).PasteSpecial(Paste=-4122)  # xlPasteFormats = -4122
+            excel.CutCopyMode = False
+            total_row += insert_cnt
 
-    # total row
-    ws.write(current_row, 4, "Total", fmt_total)
-    ws.write(current_row, 5, total_rate, fmt_total)
-    ws.write(current_row, 6, total_pkg, fmt_total)
+        elif new_n < old_n:
+            delete_cnt = old_n - new_n
+            ws.Rows(total_row - delete_cnt).Resize(delete_cnt).Delete()
+            total_row -= delete_cnt
 
-    # daily totals
-    totals = [0]*days_cnt
-    for r in rows:
-        sch = r.get("schedule", [])
-        for idx in range(min(days_cnt, len(sch))):
-            totals[idx] += sch[idx]
-    for idx, val in enumerate(totals):
-        ws.write(current_row, 7 + idx, val, fmt_cell)
-    ws.write(current_row, last_col, sum(totals), fmt_spots)
+        # --- 7) 清空資料區內容（不破壞格式）---
+        data_end_row = total_row - 1
+        ws.Range(ws.Cells(data_start_row, 1), ws.Cells(data_end_row, spots_col)).ClearContents()
+
+        # --- 8) 寫入資料列（A~G + 日程 H~AL + 檔次 AM）---
+        day_start_col = 8  # H
+        for i, r in enumerate(flat_rows):
+            rr = data_start_row + i
+
+            # A Station：由 group merge 寫入（先逐列寫，後面再合併）
+            # B Location
+            ws.Cells(rr, 2).Value = r.location
+            # C Program
+            ws.Cells(rr, 3).Value = r.program
+            # D Day-part
+            ws.Cells(rr, 4).Value = r.daypart
+            # E Size
+            ws.Cells(rr, 5).Value = size_display(r.media, r.seconds)
+            # F Rate (Net) = 分區總價
+            ws.Cells(rr, 6).Value = r.rate_total
+            # G Package-cost (Net)
+            ws.Cells(rr, 7).Value = r.package_val if r.package_val is not None else ""
+
+            # H.. (31天) 日程
+            for d in range(31):
+                cc = day_start_col + d
+                if d < len(r.schedule) and d < days:
+                    ws.Cells(rr, cc).Value = r.schedule[d]
+                else:
+                    ws.Cells(rr, cc).Value = ""
+
+            # AM 檔次
+            ws.Cells(rr, spots_col).Value = r.spots
+
+        # --- 9) 依 group 做 Station 合併 + Package-cost 合併 ---
+        # Station (A) 合併：每個 group 一個 Station（公司範例行為）
+        for (si, ei, g) in group_spans:
+            r1 = data_start_row + si
+            r2 = data_start_row + ei
+            # Station (A)
+            ws.Range(ws.Cells(r1, 1), ws.Cells(r2, 1)).Merge()
+            ws.Cells(r1, 1).Value = station_display_name(g.media)
+
+            # Package-cost (G) 合併：只有 multi-region 且 is_national 的 group
+            if g.package_merged and g.media in ["全家廣播", "新鮮視"]:
+                ws.Range(ws.Cells(r1, 7), ws.Cells(r2, 7)).Merge()
+                ws.Cells(r1, 7).Value = g.package_merged_value if g.package_merged_value is not None else ""
+
+        # --- 10) Total 列計算（依公司範例欄位）---
+        # Total row：E欄有 "Total"，F=Rate 합計，G=Package 合計，H..AL=每日合計，AM=檔次合計
+        total_rate = 0
+        total_pkg = 0
+
+        # Rate 合計：只加 int 的（"計量販" 不加）
+        for r in flat_rows:
+            if isinstance(r.rate_total, int):
+                total_rate += r.rate_total
+
+        # Package 合計：
+        # - 全省 group（廣播/新鮮視）用 merged value
+        # - 其他逐列加（int 才加）
+        used_pkg_from_group = set()
+        for g in groups:
+            if g.package_merged and g.media in ["全家廣播", "新鮮視"]:
+                if g.package_merged_value is not None:
+                    total_pkg += g.package_merged_value
+                used_pkg_from_group.add((g.media, g.seconds, g.is_national))
+            else:
+                for r in g.rows:
+                    if isinstance(r.package_val, int):
+                        total_pkg += r.package_val
+
+        # 寫入 Total 列
+        ws.Cells(total_row, 6).Value = total_rate
+        ws.Cells(total_row, 7).Value = total_pkg
+
+        # 每日 total：把每列 schedule 加總（只加顯示天數）
+        day_totals = [0] * 31
+        for r in flat_rows:
+            for d in range(min(days, len(r.schedule), 31)):
+                v = r.schedule[d]
+                if isinstance(v, int):
+                    day_totals[d] += v
+
+        for d in range(31):
+            ws.Cells(total_row, day_start_col + d).Value = day_totals[d] if d < days else ""
+
+        # 檔次合計（公司範例是顯示在 AM）
+        # 這裡做「每日總檔次」的總和（等同 total_row H..AL 加總的一半?）
+        # 但公司範例通常填「總檔次」= sum(各 group spots) 或者你希望的總檔次
+        # 依你貼的表格：Total 檔次是所有列檔次加總（含家樂福超市列也會加）
+        ws.Cells(total_row, spots_col).Value = sum([r.spots for r in flat_rows if isinstance(r.spots, int)])
+
+        # --- 11) Footer：製作 / Budget / VAT / Grand Total（位置依公司範例 G22:H25）---
+        # 你若有不同模板，只要位置不一樣，這裡改座標即可
+        vat = int(round((budget_net + production_fee) * 0.05))
+        grand = budget_net + production_fee + vat
+
+        ws.Range("H22").Value = production_fee
+        ws.Range("H23").Value = budget_net
+        ws.Range("H24").Value = vat
+        ws.Range("H25").Value = grand
+
+        # --- 12) 存檔 + 匯出 PDF ---
+        wb.SaveAs(os.path.abspath(out_xlsx))
+        ws.ExportAsFixedFormat(0, os.path.abspath(out_pdf))  # 0 = xlTypePDF
+
+        wb.Close(SaveChanges=False)
+        excel.Quit()
+
+        with open(out_xlsx, "rb") as f:
+            xlsx_bytes = f.read()
+        with open(out_pdf, "rb") as f:
+            pdf_bytes = f.read()
+
+        return xlsx_bytes, pdf_bytes
+
+    finally:
+        try:
+            excel.Quit()
+        except Exception:
+            pass
+        pythoncom.CoUninitialize()
+
+
+# ============================================================
+# 5) openpyxl fallback（無 Excel 時，擬真度會差：shape/logo 可能消失）
+# ============================================================
+
+def openpyxl_generate_fallback(
+    template_path: str,
+    client_name: str,
+    products_str: str,
+    start_dt: date,
+    end_dt: date,
+    groups: List[GroupOut],
+    production_fee: int,
+    budget_net: int
+) -> bytes:
+    if openpyxl is None:
+        raise RuntimeError("openpyxl 未安裝，且此環境也無 Excel COM。請安裝 openpyxl 或在 Windows 用 Excel COM。")
+
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.worksheets[0]
+
+    # 盡量依公司範例填位
+    ws["B3"].value = client_name
+    ws["B4"].value = products_str
+    ws["B5"].value = f"{start_dt.strftime('%Y.%m.%d')} - {end_dt.strftime('%Y.%m.%d')}"
+    used_media = []
+    for g in groups:
+        if g.media not in used_media:
+            used_media.append(g.media)
+    ws["B6"].value = "、".join(used_media)
+
+    days = (end_dt - start_dt).days + 1
+    if days > 31:
+        raise ValueError("模板最多 31 天。")
+
+    # 日期表頭
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    cur = start_dt
+    for i in range(31):
+        col = openpyxl.utils.get_column_letter(8 + i)  # H start
+        if i < days:
+            ws[f"{col}8"].value = cur.day
+            ws[f"{col}9"].value = weekdays[cur.weekday()]
+            cur += timedelta(days=1)
+        else:
+            ws[f"{col}8"].value = ""
+            ws[f"{col}9"].value = ""
+
+    # 找 Total row
+    total_row = None
+    for r in range(10, 500):
+        v = ws.cell(r, 5).value
+        if isinstance(v, str) and v.strip() == "Total":
+            total_row = r
+            break
+    if total_row is None:
+        raise RuntimeError("找不到 Total row（fallback 無法處理此模板）。")
+
+    data_start_row = 10
+    spots_col = 39
+
+    flat_rows: List[RowOut] = []
+    group_spans: List[Tuple[int, int, GroupOut]] = []
+    idx = 0
+    for g in groups:
+        si = idx
+        for r in g.rows:
+            flat_rows.append(r)
+            idx += 1
+        ei = idx - 1
+        group_spans.append((si, ei, g))
+
+    new_n = len(flat_rows)
+    old_n = total_row - data_start_row
+
+    # insert/delete rows
+    if new_n > old_n:
+        ws.insert_rows(total_row, amount=(new_n - old_n))
+        total_row += (new_n - old_n)
+    elif new_n < old_n:
+        for _ in range(old_n - new_n):
+            ws.delete_rows(total_row - 1, 1)
+            total_row -= 1
+
+    # 清空
+    for r in range(data_start_row, total_row):
+        for c in range(1, spots_col + 1):
+            ws.cell(r, c).value = None
+
+    # 寫入
+    day_start_col = 8
+    for i, r in enumerate(flat_rows):
+        rr = data_start_row + i
+        ws.cell(rr, 2).value = r.location
+        ws.cell(rr, 3).value = r.program
+        ws.cell(rr, 4).value = r.daypart
+        ws.cell(rr, 5).value = size_display(r.media, r.seconds)
+        ws.cell(rr, 6).value = r.rate_total
+        ws.cell(rr, 7).value = r.package_val if r.package_val is not None else ""
+        for d in range(31):
+            cc = day_start_col + d
+            if d < days and d < len(r.schedule):
+                ws.cell(rr, cc).value = r.schedule[d]
+            else:
+                ws.cell(rr, cc).value = ""
+        ws.cell(rr, spots_col).value = r.spots
+
+    # merge
+    for (si, ei, g) in group_spans:
+        r1 = data_start_row + si
+        r2 = data_start_row + ei
+        ws.merge_cells(start_row=r1, start_column=1, end_row=r2, end_column=1)
+        ws.cell(r1, 1).value = station_display_name(g.media)
+
+        if g.package_merged and g.media in ["全家廣播", "新鮮視"]:
+            ws.merge_cells(start_row=r1, start_column=7, end_row=r2, end_column=7)
+            ws.cell(r1, 7).value = g.package_merged_value if g.package_merged_value is not None else ""
+
+    # totals
+    total_rate = sum([r.rate_total for r in flat_rows if isinstance(r.rate_total, int)])
+    total_pkg = 0
+    for g in groups:
+        if g.package_merged and g.media in ["全家廣播", "新鮮視"]:
+            if g.package_merged_value is not None:
+                total_pkg += g.package_merged_value
+        else:
+            for r in g.rows:
+                if isinstance(r.package_val, int):
+                    total_pkg += r.package_val
+
+    ws.cell(total_row, 6).value = total_rate
+    ws.cell(total_row, 7).value = total_pkg
 
     # footer
-    current_row += 1
-    ws.write(current_row, 6, "製作", fmt_cell)
-    ws.write(current_row, 7, prod_cost, fmt_num)
+    vat = int(round((budget_net + production_fee) * 0.05))
+    grand = budget_net + production_fee + vat
+    ws["H22"].value = production_fee
+    ws["H23"].value = budget_net
+    ws["H24"].value = vat
+    ws["H25"].value = grand
 
-    current_row += 1
-    ws.write(current_row, 6, "專案優惠價 (Budget)", fmt_cell)
-    ws.write(current_row, 7, budget, fmt_discount)
-
-    vat = int(round((budget + prod_cost) * 0.05))
-    current_row += 1
-    ws.write(current_row, 6, "5% VAT", fmt_cell)
-    ws.write(current_row, 7, vat, fmt_num)
-
-    grand = budget + prod_cost + vat
-    current_row += 1
-    ws.write(current_row, 6, "Grand Total", fmt_grand)
-    ws.write(current_row, 7, grand, fmt_grand)
-
-    # widths
-    ws.set_column('A:A', 22)
-    ws.set_column('B:B', 16)
-    ws.set_column('C:C', 10)
-    ws.set_column('D:D', 14)
-    ws.set_column('E:E', 8)
-    ws.set_column('F:G', 14)
-    ws.set_column(7, last_col, 4)
-
-    wb.close()
-    output.seek(0)
-    return output.getvalue()
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
-def html_to_pdf_bytes(html_str):
-    if not WEASY_OK:
-        return None
-    try:
-        return HTML(string=html_str).write_pdf()
-    except Exception:
-        return None
+# ============================================================
+# 6) Streamlit UI
+# ============================================================
 
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro（擬真版）")
 
-# ==========================================
-# 5) Streamlit UI
-# ==========================================
+st.title("📺 Cue Sheet Pro（擬真版：Excel 模板 COM 優先）")
 
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro (擬真版)")
-st.title("📺 媒體 Cue 表生成器（擬真版）")
+with st.expander("⚙️ 重要說明（為什麼我這版會更像公司範例）", expanded=True):
+    st.markdown(
+        """
+- **要做到字型/顏色/Logo/合併格完全像公司範例，必須用 Excel 原生模板 + COM 操作**（openpyxl 會掉 Shape/Logo，擬真度一定輸）。
+- 這版會優先偵測 **Windows + Excel COM（pywin32）**，用同一份公司模板直接填值再匯出 PDF。
+- 若你在雲端或沒裝 Excel，才會 fallback openpyxl（但那時擬真度會下降）。
+        """
+    )
 
-# 基本資料
-st.markdown("### 1) 基本資料")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns([1.2, 1.2, 1])
+
 with col1:
     client_name = st.text_input("客戶名稱", "萬國通路")
+    start_date = st.date_input("開始日", date(2026, 1, 1))
 with col2:
-    product_name = st.text_input("產品名稱", "統一布丁")
+    end_date = st.date_input("結束日", date(2026, 1, 31))
+    total_budget_net = st.number_input("總預算（未稅 Net）", min_value=0, value=1000000, step=10000)
 with col3:
-    total_budget_input = st.number_input("總預算 (未稅 Net)", value=1000000, step=10000)
+    production_fee = st.number_input("製作費", min_value=0, value=10000, step=1000)
 
-col4, col5 = st.columns(2)
-with col4:
-    start_date = st.date_input("開始日", datetime(2026, 1, 1))
-with col5:
-    end_date = st.date_input("結束日", datetime(2026, 1, 31))
+days = (end_date - start_date).days + 1
+st.info(f"📅 走期：{days} 天（模板最多 31 天）")
 
-days_count = (end_date - start_date).days + 1
-if days_count <= 0:
-    st.error("結束日必須晚於開始日")
-    st.stop()
-if days_count > 31:
-    st.warning("此版本擬真以 31 天為上限，會只顯示前 31 天。")
-days_count = min(days_count, 31)
-st.info(f"📅 走期共 **{days_count}** 天（擬真顯示）")
+st.markdown("### 🧾 模板選擇（越像公司範例越重要）")
+template_file = st.file_uploader(
+    "請上傳「公司原版 Cue Excel（有 Logo、有配色、有合併格）」當模板（建議用你上傳的 Cue_萬國通路 (35).xlsx 那份作為基底）",
+    type=["xlsx"]
+)
 
-prod_cost = 10000
+default_template_path = None
+# 如果你在本機同資料夾已經放公司範例模板，可以改這裡
+# default_template_path = r"C:\...\Cue_萬國通路 (35).xlsx"
 
-st.markdown("### 2) 媒體投放設定（總和 100%）")
+engine = st.selectbox(
+    "輸出引擎（擬真度排序：Excel COM > openpyxl）",
+    options=["AUTO（有 Excel 就用 COM）", "強制 Excel COM", "強制 openpyxl（不保證 logo/shape）"],
+    index=0
+)
 
-# 你範例那種 share flow：這裡簡化成直接填三個 slider，總和自動 normalize（避免 UI 卡死）
-colm1, colm2, colm3 = st.columns(3)
-with colm1:
-    st.markdown("#### 📻 全家廣播")
-    fm_act = st.checkbox("開啟", True, key="fm_act")
-    fm_nat = st.checkbox("全省聯播", True, key="fm_nat") if fm_act else False
-    fm_regs = []
-    if fm_act:
-        if fm_nat:
-            fm_regs = ["全省"]
-        else:
-            fm_regs = st.multiselect("分區", REGIONS_ORDER, default=["北區", "桃竹苗", "中區"], key="fm_regs")
-    fm_secs = st.multiselect("秒數", DURATIONS, default=[20], key="fm_secs") if fm_act else []
-    fm_share = st.slider("預算佔比 %", 0, 100, 70, key="fm_share") if fm_act else 0
+st.markdown("### 2) 媒體投放設定（Share 加總需 = 100%）")
 
-with colm2:
-    st.markdown("#### 📺 新鮮視")
-    fv_act = st.checkbox("開啟", True, key="fv_act")
-    fv_nat = st.checkbox("全省聯播 ", False, key="fv_nat") if fv_act else False
-    fv_regs = []
-    if fv_act:
-        if fv_nat:
-            fv_regs = ["全省"]
-        else:
-            fv_regs = st.multiselect("分區 ", REGIONS_ORDER, default=["北區", "桃竹苗"], key="fv_regs")
-    fv_secs = st.multiselect("秒數 ", DURATIONS, default=[10], key="fv_secs") if fv_act else []
-    fv_share = st.slider("預算佔比 % ", 0, 100, 20, key="fv_share") if fv_act else 0
+# UI：和你 v60.x 類似，但修正「未選全省不應出現全省/全部分區」
+config_media: Dict[str, Dict[str, Any]] = {}
 
-with colm3:
-    st.markdown("#### 🛒 家樂福")
-    cf_act = st.checkbox("開啟 ", True, key="cf_act")
-    cf_secs = st.multiselect("秒數  ", DURATIONS, default=[20], key="cf_secs") if cf_act else []
-    cf_share = st.slider("預算佔比 %  ", 0, 100, 10, key="cf_share") if cf_act else 0
+# 為了穩定：先讓使用者明確設定 share，避免「最後一個自動填滿」造成你難 debug
+c1, c2, c3 = st.columns(3)
 
-# normalize shares to sum=100 for active medias
-raw = []
-if fm_act: raw.append(("全家廣播", fm_share))
-if fv_act: raw.append(("新鮮視", fv_share))
-if cf_act: raw.append(("家樂福", cf_share))
-sum_share = sum(v for _, v in raw)
-if sum_share <= 0:
-    st.warning("請至少開啟一個媒體並給預算佔比")
-    st.stop()
+def sec_shares_ui(prefix: str, seconds_list: List[int]) -> Dict[int, int]:
+    seconds_list = sorted(seconds_list)
+    out = {}
+    if not seconds_list:
+        return out
+    if len(seconds_list) == 1:
+        out[seconds_list[0]] = 100
+        return out
 
-norm = [(k, v * 100.0 / sum_share) for k, v in raw]
+    left = 100
+    for s in seconds_list[:-1]:
+        v = st.slider(f"{s}秒佔比", 0, left, min(50, left), key=f"{prefix}_secshare_{s}")
+        out[s] = v
+        left -= v
+    out[seconds_list[-1]] = left
+    st.caption(f"🔹 {seconds_list[-1]}秒：{left}%")
+    return out
 
-def build_sec_shares(secs):
-    secs = sorted(secs)
-    if not secs:
-        return {}
-    # 先簡化：一律平均（你若要跟 v60.5 一樣逐秒 slider，我也可以再加回去）
-    per = 100 // len(secs)
-    mp = {s: per for s in secs}
-    mp[secs[0]] += (100 - per * len(secs))
-    return mp
+with c1:
+    st.subheader("📻 全家廣播")
+    act = st.checkbox("啟用", value=True, key="fm_act")
+    if act:
+        is_nat = st.checkbox("全省聯播", value=True, key="fm_nat")
+        regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區", "桃竹苗"], key="fm_regs")
+        secs = st.multiselect("秒數", [5,10,15,20,30,35,45], default=[20], key="fm_secs")
+        share = st.slider("預算佔比%", 0, 100, 70, key="fm_share")
+        ss = sec_shares_ui("fm", secs)
+        config_media["全家廣播"] = {"is_national": is_nat, "regions": regs if not is_nat else REGIONS_ORDER, "seconds": secs, "share": share, "sec_shares": ss}
 
-config_media = {}
-for k, share in norm:
-    if k == "全家廣播":
-        if fm_nat:
-            regs = ["全省"]
-        else:
-            regs = fm_regs
-        config_media[k] = {
-            "is_national": fm_nat,
-            "regions": regs if not fm_nat else ["全省"],
-            "seconds": sorted(fm_secs),
-            "share": share,
-            "sec_shares": build_sec_shares(fm_secs)
-        }
-    elif k == "新鮮視":
-        if fv_nat:
-            regs = ["全省"]
-        else:
-            regs = fv_regs
-        config_media[k] = {
-            "is_national": fv_nat,
-            "regions": regs if not fv_nat else ["全省"],
-            "seconds": sorted(fv_secs),
-            "share": share,
-            "sec_shares": build_sec_shares(fv_secs)
-        }
-    elif k == "家樂福":
-        config_media[k] = {
-            "is_national": True,
-            "regions": ["全省"],
-            "seconds": sorted(cf_secs),
-            "share": share,
-            "sec_shares": build_sec_shares(cf_secs)
-        }
+with c2:
+    st.subheader("📺 新鮮視")
+    act = st.checkbox("啟用 ", value=True, key="fv_act")
+    if act:
+        is_nat = st.checkbox("全省聯播 ", value=False, key="fv_nat")
+        regs = ["全省"] if is_nat else st.multiselect("區域 ", REGIONS_ORDER, default=["北區", "中區", "高屏"], key="fv_regs")
+        secs = st.multiselect("秒數 ", [5,10,15,20,30,35,45], default=[10], key="fv_secs")
+        share = st.slider("預算佔比% ", 0, 100, 20, key="fv_share")
+        ss = sec_shares_ui("fv", secs)
+        config_media["新鮮視"] = {"is_national": is_nat, "regions": regs if not is_nat else REGIONS_ORDER, "seconds": secs, "share": share, "sec_shares": ss}
 
-# 防呆：非全省時如果 regions 空，就不產生 rows
-for m, cfg in list(config_media.items()):
-    if m in ["全家廣播", "新鮮視"] and (not cfg.get("is_national")) and (not cfg.get("regions")):
-        st.error(f"{m} 沒勾全省但分區為空，請至少選 1 個分區。")
+with c3:
+    st.subheader("🛒 家樂福")
+    act = st.checkbox("啟用  ", value=True, key="cf_act")
+    if act:
+        secs = st.multiselect("秒數  ", [5,10,15,20,30,35,45], default=[20], key="cf_secs")
+        share = st.slider("預算佔比%  ", 0, 100, 10, key="cf_share")
+        ss = sec_shares_ui("cf", secs)
+        config_media["家樂福"] = {"is_national": True, "regions": ["全省"], "seconds": secs, "share": share, "sec_shares": ss}
+
+share_sum = sum([v["share"] for v in config_media.values()])
+if share_sum != 100:
+    st.warning(f"⚠️ 目前 share 加總 = {share_sum}%（需等於 100% 才能生成）")
+
+# 產品字串（秒數集合）
+secs_all = set()
+for m, cfg in config_media.items():
+    for s in cfg.get("seconds", []):
+        secs_all.add(s)
+products_str = "、".join([f"{s}秒" for s in sorted(secs_all)])
+
+st.markdown("### 3) 生成結果")
+colA, colB, colC = st.columns([1,1,1])
+colA.metric("客戶預算（未稅）", f"{total_budget_net:,}")
+vat = int(round((total_budget_net + production_fee) * 0.05))
+colB.metric("VAT 5%", f"{vat:,}")
+colC.metric("Grand Total（含稅）", f"{(total_budget_net+production_fee+vat):,}")
+
+if st.button("🚀 生成 Cue（Excel + PDF）", type="primary", disabled=(share_sum != 100)):
+    groups, meta = build_groups(total_budget_net, start_date, end_date, config_media)
+    if not groups:
+        st.error("沒有可輸出的資料（請檢查是否有選秒數、share、或預算為 0）。")
         st.stop()
 
-# 計算
-final_rows, debug_logs, total_rate, total_pkg = build_final_rows(config_media, total_budget_input, days_count)
+    # 顯示 debug（避免你再被規則搞到崩潰）
+    with st.expander("🧠 本次運算 Debug（檔次/是否未達標/全省 or 分區）", expanded=False):
+        for d in meta["debug"]:
+            st.write(
+                f"{d['media']} {d['sec']}秒 | budget={d['budget']:.0f} | spots={d['spots']} | std={d['std']} | "
+                f"{'未達標' if d['under'] else '達標'} | factor={d['factor']} | {'全省' if d['is_national'] else '分區'}"
+            )
 
-# product string（顯示用）
-all_secs = sorted(set([r["seconds"] for r in final_rows]))
-product_str = "、".join([f"{s}秒" for s in all_secs]) + f" {product_name}" if all_secs else product_name
+    # 決定模板來源
+    if template_file is not None:
+        tmp_template = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+        tmp_template.write(template_file.read())
+        tmp_template.close()
+        template_path = tmp_template.name
+    elif default_template_path and os.path.exists(default_template_path):
+        template_path = default_template_path
+    else:
+        st.error("請上傳公司原版 Cue Excel 當模板（強烈建議用 Cue_萬國通路 的那份）。")
+        st.stop()
 
-# 結果摘要
-st.markdown("### 3) 結果摘要")
-m1, m2, m3 = st.columns(3)
-vat = int(round((total_budget_input + prod_cost) * 0.05))
-grand_total = total_budget_input + prod_cost + vat
-m1.metric("客戶預算 (未稅)", f"{total_budget_input:,}")
-m2.metric("折扣後總金額 (含稅)", f"{grand_total:,}")
-m3.metric("表格顯示 Total Package-cost", f"{total_pkg:,}")
+    # 決定引擎
+    use_com = False
+    if engine == "AUTO（有 Excel 就用 COM）":
+        use_com = HAS_EXCEL_COM
+    elif engine == "強制 Excel COM":
+        use_com = True
+    else:
+        use_com = False
 
-with st.expander("💡 Debug（檔次/是否未達標）", expanded=False):
-    for log in debug_logs:
-        nat_txt = "全省" if log["is_national"] else "分區"
-        st.write(f"- {log['media']} / {log['sec']}秒 / {nat_txt}：預算 {log['budget']:,.0f} → 檔次 {log['spots']}（Std {log['std']}）{(' → 未達標 x1.1' if log['penalty'] else '')}")
+    try:
+        if use_com:
+            if not HAS_EXCEL_COM:
+                st.error("此環境無法使用 Excel COM（請確認 Windows + 已安裝 Excel + pip install pywin32）。")
+                st.stop()
 
-# HTML preview
-st.markdown("### 4) 擬真預覽（HTML rowSpan）")
-html = generate_html_preview(
-    final_rows, days_count, start_date, end_date,
-    client_name, product_str, total_rate, total_pkg, total_budget_input, prod_cost
-)
-st.components.v1.html(html, height=650, scrolling=True)
+            xlsx_bytes, pdf_bytes = excel_com_generate_from_template(
+                template_path=template_path,
+                client_name=client_name,
+                products_str=products_str,
+                start_dt=start_date,
+                end_dt=end_date,
+                groups=groups,
+                production_fee=production_fee,
+                budget_net=total_budget_net
+            )
 
-# downloads
-st.markdown("### 5) 下載")
-xlsx_bytes = generate_excel(
-    final_rows, days_count, start_date, end_date,
-    client_name, product_str, total_rate, total_pkg,
-    total_budget_input, prod_cost
-)
-st.download_button(
-    "📥 下載 Excel (.xlsx)",
-    data=xlsx_bytes,
-    file_name=f"Cue_{client_name}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+            st.success("✅ 已以 Excel COM 生成（擬真度最高）")
+            st.download_button(
+                "📥 下載 Excel",
+                data=xlsx_bytes,
+                file_name=f"Cue_{client_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            st.download_button(
+                "📄 下載 PDF（Excel 原生匯出，最像公司範例）",
+                data=pdf_bytes,
+                file_name=f"Cue_{client_name}.pdf",
+                mime="application/pdf"
+            )
 
-if WEASY_OK:
-    pdf_bytes = html_to_pdf_bytes(html)
-    if pdf_bytes:
-        st.download_button(
-            "📥 下載 PDF（HTML 擬真）",
-            data=pdf_bytes,
-            file_name=f"Cue_{client_name}.pdf",
-            mime="application/pdf"
-        )
-else:
-    st.info("PDF 需要 weasyprint：pip install weasyprint")
+        else:
+            xlsx_bytes = openpyxl_generate_fallback(
+                template_path=template_path,
+                client_name=client_name,
+                products_str=products_str,
+                start_dt=start_date,
+                end_dt=end_date,
+                groups=groups,
+                production_fee=production_fee,
+                budget_net=total_budget_net
+            )
+            st.warning("⚠️ 已用 openpyxl fallback 生成（Logo/Shape/字型擬真度可能下降）。建議改用 Excel COM。")
+            st.download_button(
+                "📥 下載 Excel",
+                data=xlsx_bytes,
+                file_name=f"Cue_{client_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    except Exception as e:
+        st.exception(e)
+
+    finally:
+        try:
+            if template_file is not None and os.path.exists(template_path):
+                os.remove(template_path)
+        except Exception:
+            pass
