@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定 & 自動載入
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.0")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v74.1")
 
 GOOGLE_DRIVE_FILE_ID = "11R1SA_hpFD5O_MGmYeh4BdtcUhK2bPta"
 DEFAULT_FILENAME = "1209-Cue表相關資料.xlsx"
@@ -121,7 +121,6 @@ STORE_COUNTS = {
 }
 STORE_COUNTS_NUM = {k: parse_count_to_int(v) for k, v in STORE_COUNTS.items()}
 
-# [List Price (顯示用), Net Price (運算用)]
 PRICING_DB = {
     "全家廣播": { "Std_Spots": 480, "Day_Part": "00:00-24:00", "全省": [400000, 320000], "北區": [250000, 200000], "桃竹苗": [150000, 120000], "中區": [150000, 120000], "雲嘉南": [100000, 80000], "高屏": [100000, 80000], "東區": [62500, 50000] },
     "新鮮視": { "Std_Spots": 504, "Day_Part": "07:00-22:00", "全省": [150000, 120000], "北區": [150000, 120000], "桃竹苗": [120000, 96000], "中區": [90000, 72000], "雲嘉南": [75000, 60000], "高屏": [75000, 60000], "東區": [45000, 36000] },
@@ -164,7 +163,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.0 - Rate顯示總價 & 雙重懲罰)
+# 4. 核心計算函式 (Logic v4.1 - Detailed Debug)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -172,39 +171,38 @@ def calculate_plan_data(config, total_budget, days_count):
     debug_logs = []
 
     for m, cfg in config.items():
-        m_budget = total_budget * (cfg["share"] / 100.0)
+        m_budget_total = total_budget * (cfg["share"] / 100.0)
+        
+        # [NEW] 依照秒數佔比再次分配預算
         for sec, sec_pct in cfg["sec_shares"].items():
-            s_budget = m_budget * (sec_pct / 100.0)
+            s_budget = m_budget_total * (sec_pct / 100.0)
             if s_budget <= 0: continue
             
             factor = get_sec_factor(m, sec)
+            log_details = {}
             
             if m in ["全家廣播", "新鮮視"]:
                 db = PRICING_DB[m]
                 calc_regs = ["全省"] if cfg["is_national"] else cfg["regions"]
                 display_regs = REGIONS_ORDER if cfg["is_national"] else cfg["regions"]
                 
-                # Net 算檔次
+                # --- Step 1: Net 算檔次 ---
                 unit_net_sum = 0
                 for r in calc_regs:
                     unit_net_sum += (db[r][1] / db["Std_Spots"]) * factor
                 if unit_net_sum == 0: continue
                 
                 spots_init = math.ceil(s_budget / unit_net_sum)
-                is_under_target = spots_init < db["Std_Spots"]
+                std_spots = db["Std_Spots"]
+                is_under_target = spots_init < std_spots
                 
-                # 懲罰邏輯分流
-                # 1. 運算用 (Net 成本): 未達標一律 x1.1
                 calc_penalty = 1.1 if is_under_target else 1.0 
                 
-                # 2. 顯示用 (List 價格): 
                 if cfg["is_national"]:
-                    # 全省: 分區列(Row)不懲罰，Total(總價)懲罰
                     row_display_penalty = 1.0 
                     total_display_penalty = 1.1 if is_under_target else 1.0
                     status_msg = "全省(分區豁免/總價懲罰)" if is_under_target else "達標"
                 else:
-                    # 分區: 分區列(Row)要懲罰
                     row_display_penalty = 1.1 if is_under_target else 1.0
                     total_display_penalty = 1.0 
                     status_msg = "未達標 x1.1" if is_under_target else "達標"
@@ -213,21 +211,31 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
-                sch = calculate_schedule(spots_final, days_count)
-                debug_logs.append(f"{m} {sec}s: {status_msg}, Spots: {spots_final}")
+                # [NEW] 詳細 Log
+                log_details = {
+                    "Media": f"{m} ({sec}s)",
+                    "Budget": f"${s_budget:,.0f}",
+                    "Formula": f"Net總和(${sum([db[r][1] for r in calc_regs]):,}) / {std_spots} * {factor}",
+                    "Net_Unit": f"${unit_net_sum:.2f}",
+                    "Init_Spots": f"{spots_init} (Std: {std_spots})",
+                    "Penalty": f"x{calc_penalty} ({status_msg})",
+                    "Final_Cost": f"${unit_net_sum * calc_penalty:.2f}",
+                    "Final_Spots": spots_final
+                }
+                debug_logs.append(log_details)
 
-                # List 填表格
+                sch = calculate_schedule(spots_final, days_count)
+
+                # --- Step 2: List 填表格 ---
                 for i, r in enumerate(display_regs):
                     list_price_region = db[r][0]
-                    
-                    # [關鍵修正] Rate 顯示分區「總價」(Unit * Spots)
+                    # [關鍵修正] Rate 顯示分區「總價」
                     unit_rate_display = int((list_price_region / db["Std_Spots"]) * factor * row_display_penalty)
-                    total_rate_display = unit_rate_display * spots_final  # 這裡算出總價
-                    
-                    pkg_display = total_rate_display # Package Cost 也是總價
+                    total_rate_display = unit_rate_display * spots_final 
+                    pkg_display = total_rate_display
                     
                     if cfg["is_national"]:
-                        # 全省 Total 計算：使用全省 List Price
+                        # 全省 Total 計算
                         if i == 0:
                             nat_list = db["全省"][0]
                             nat_unit = int((nat_list / db["Std_Spots"]) * factor * total_display_penalty)
@@ -240,7 +248,6 @@ def calculate_plan_data(config, total_budget, days_count):
                         "program_num": STORE_COUNTS_NUM.get(f"新鮮視_{r}" if m=="新鮮視" else r, 0),
                         "daypart": db["Day_Part"], "seconds": sec,
                         "spots": spots_final, "schedule": sch,
-                        # Rate 顯示總價
                         "rate_display": total_rate_display, 
                         "pkg_display": pkg_display,
                         "is_pkg_member": cfg["is_national"]
@@ -253,11 +260,24 @@ def calculate_plan_data(config, total_budget, days_count):
                 
                 spots_init = math.ceil(s_budget / unit_net)
                 penalty = 1.1 if spots_init < base_std else 1.0
+                
                 spots_final = math.ceil(s_budget / (unit_net * penalty))
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
-                # 量販顯示 (Rate 顯示總價)
+                # [NEW] 詳細 Log
+                log_details = {
+                    "Media": f"家樂福 ({sec}s)",
+                    "Budget": f"${s_budget:,.0f}",
+                    "Formula": f"Net(${db['量販_全省']['Net']:,}) / {base_std} * {factor}",
+                    "Net_Unit": f"${unit_net:.2f}",
+                    "Init_Spots": f"{spots_init} (Std: {base_std})",
+                    "Penalty": f"x{penalty}",
+                    "Final_Cost": f"${unit_net * penalty:.2f}",
+                    "Final_Spots": spots_final
+                }
+                debug_logs.append(log_details)
+                
                 base_list = db["量販_全省"]["List"]
                 unit_rate_h = int((base_list / base_std) * factor * penalty)
                 total_rate_h = unit_rate_h * spots_final
@@ -650,7 +670,7 @@ def generate_html_preview(rows, days_cnt, start_dt, end_dt, c_name, p_display, f
 # =========================================================
 # 7. UI Main
 # =========================================================
-st.title("📺 媒體 Cue 表生成器 (v74.0)")
+st.title("📺 媒體 Cue 表生成器 (v74.1)")
 
 auto_tpl, source, msgs = load_default_template()
 template_bytes = auto_tpl
@@ -735,9 +755,20 @@ if is_rad:
         st.markdown("#### 📻 全家廣播")
         is_nat = st.checkbox("全省聯播", True, key="rad_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=REGIONS_ORDER, key="rad_reg")
-        secs = st.multiselect("秒數", [5,10,15,20,30], [20], key="rad_sec")
+        secs = st.multiselect("秒數", DURATIONS, [20], key="rad_sec")
         st.slider("預算 %", 0, 100, key="rad_share", on_change=on_slider_change, args=("rad_share",))
-        sec_shares = {secs[0]: 100} if secs else {}
+        
+        # [NEW] 秒數佔比分配
+        sec_shares = {}
+        if len(secs) > 1:
+            st.caption("分配秒數佔比")
+            rem = 100
+            for s in sorted(secs)[:-1]:
+                v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"rs_{s}")
+                sec_shares[s] = v; rem -= v
+            sec_shares[sorted(secs)[-1]] = rem
+        elif secs: sec_shares[secs[0]] = 100
+        
         config["全家廣播"] = {"is_national": is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.rad_share}
 
 if is_fv:
@@ -745,17 +776,39 @@ if is_fv:
         st.markdown("#### 📺 新鮮視")
         is_nat = st.checkbox("全省聯播", False, key="fv_nat")
         regs = ["全省"] if is_nat else st.multiselect("區域", REGIONS_ORDER, default=["北區"], key="fv_reg")
-        secs = st.multiselect("秒數", [5,10,15,20,30], [10], key="fv_sec")
+        secs = st.multiselect("秒數", DURATIONS, [10], key="fv_sec")
         st.slider("預算 %", 0, 100, key="fv_share", on_change=on_slider_change, args=("fv_share",))
-        sec_shares = {secs[0]: 100} if secs else {}
+        
+        # [NEW] 秒數佔比分配
+        sec_shares = {}
+        if len(secs) > 1:
+            st.caption("分配秒數佔比")
+            rem = 100
+            for s in sorted(secs)[:-1]:
+                v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"fs_{s}")
+                sec_shares[s] = v; rem -= v
+            sec_shares[sorted(secs)[-1]] = rem
+        elif secs: sec_shares[secs[0]] = 100
+        
         config["新鮮視"] = {"is_national": is_nat, "regions": regs, "sec_shares": sec_shares, "share": st.session_state.fv_share}
 
 if is_cf:
     with m3:
         st.markdown("#### 🛒 家樂福")
-        secs = st.multiselect("秒數", [5,10,15,20,30], [20], key="cf_sec")
+        secs = st.multiselect("秒數", DURATIONS, [20], key="cf_sec")
         st.slider("預算 %", 0, 100, key="cf_share", on_change=on_slider_change, args=("cf_share",))
-        sec_shares = {secs[0]: 100} if secs else {}
+        
+        # [NEW] 秒數佔比分配
+        sec_shares = {}
+        if len(secs) > 1:
+            st.caption("分配秒數佔比")
+            rem = 100
+            for s in sorted(secs)[:-1]:
+                v = st.slider(f"{s}秒 %", 0, rem, int(rem/2), key=f"cs_{s}")
+                sec_shares[s] = v; rem -= v
+            sec_shares[sorted(secs)[-1]] = rem
+        elif secs: sec_shares[secs[0]] = 100
+        
         config["家樂福"] = {"regions": ["全省"], "sec_shares": sec_shares, "share": st.session_state.cf_share}
 
 if config:
@@ -772,9 +825,14 @@ if config:
     st.components.v1.html(html_preview, height=700, scrolling=True)
 
     with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
-        st.markdown("#### 1. 本次預算分配 (Waterfall)")
+        st.markdown("#### 1. 本次預算分配詳細運算")
         for log in logs:
-            st.text(log)
+            st.markdown(f"**{log['Media']}**")
+            st.markdown(f"- 預算: {log['Budget']}")
+            st.markdown(f"- 公式: {log['Formula']}")
+            st.markdown(f"- 原始單價: {log['Net_Unit']} | 懲罰: {log['Penalty']}")
+            st.markdown(f"- 最終單價: {log['Final_Cost']} | 執行檔次: **{log['Final_Spots']}**")
+            st.divider()
 
     # 2. 產生檔案
     if template_bytes and rows:
