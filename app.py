@@ -38,7 +38,7 @@ def html_escape(s):
 # =========================================================
 # 1. 頁面設定
 # =========================================================
-st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.2")
+st.set_page_config(layout="wide", page_title="Cue Sheet Pro v76.3")
 
 # =========================================================
 # 2. PDF 策略
@@ -182,7 +182,7 @@ def get_remarks_text(sign_deadline, billing_month, payment_date):
     ]
 
 # =========================================================
-# 4. 核心計算函式 (Logic v4.5 - Detailed Debug Restored)
+# 4. 核心計算函式 (Logic v4.5)
 # =========================================================
 def calculate_plan_data(config, total_budget, days_count):
     rows = []
@@ -210,8 +210,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 
                 spots_init = math.ceil(s_budget / unit_net_sum)
                 is_under_target = spots_init < db["Std_Spots"]
-                
-                # 懲罰邏輯
                 calc_penalty = 1.1 if is_under_target else 1.0 
                 
                 if cfg["is_national"]:
@@ -227,7 +225,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 if spots_final == 0: spots_final = 2
                 
-                # [RESTORED] 詳細 Log
                 debug_logs.append({
                     "Media": f"{m} ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -272,7 +269,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 db = PRICING_DB["家樂福"]
                 base_std = db["量販_全省"]["Std_Spots"]
                 unit_net = (db["量販_全省"]["Net"] / base_std) * factor
-                
                 spots_init = math.ceil(s_budget / unit_net)
                 penalty = 1.1 if spots_init < base_std else 1.0
                 status_msg = "未達標 x1.1" if penalty > 1 else "達標"
@@ -281,7 +277,6 @@ def calculate_plan_data(config, total_budget, days_count):
                 if spots_final % 2 != 0: spots_final += 1
                 sch_h = calculate_schedule(spots_final, days_count)
                 
-                # [RESTORED] 詳細 Log
                 debug_logs.append({
                     "Media": f"家樂福 ({sec}s)",
                     "Budget": f"${s_budget:,.0f}",
@@ -308,7 +303,7 @@ def calculate_plan_data(config, total_budget, days_count):
     return rows, total_list_accum, debug_logs
 
 # =========================================================
-# 5. OpenPyXL 渲染引擎
+# 5. OpenPyXL 渲染引擎 (含錯誤回報)
 # =========================================================
 SHEET_META = {
     "Dongwu": {
@@ -372,6 +367,7 @@ def copy_style(source_cell, target_cell):
         target_cell.protection = copy(source_cell.protection)
 
 def find_row_by_content(ws, col_letter, keyword):
+    # 放寬搜尋：只要包含關鍵字即可
     col_idx = column_index_from_string(col_letter)
     for r in range(1, ws.max_row + 1):
         v = ws.cell(r, col_idx).value
@@ -425,6 +421,13 @@ def force_center_columns_range(ws, col_letters, start_row, end_row):
                 new_align.vertical = 'center'
                 cell.alignment = new_align
 
+def _get_master_cell(ws, cell):
+    if not isinstance(cell, MergedCell): return cell
+    for mr in ws.merged_cells.ranges:
+        if mr.min_row <= cell.row <= mr.max_row and mr.min_col <= cell.column <= mr.max_col:
+            return ws.cell(row=mr.min_row, column=mr.min_col)
+    return None
+
 def generate_excel_from_template(format_type, start_dt, end_dt, client_name, product_display_str, rows, remarks_list, template_bytes, total_list_accum):
     meta = SHEET_META[format_type]
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
@@ -446,7 +449,10 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
     # Content
     cols = meta["cols"]
     total_cell = find_row_by_content(ws, cols["station"], meta["total_label"])
-    if not total_cell: return None
+    
+    # [FIXED] 錯誤回報機制
+    if not total_cell: 
+        return None, f"樣板中找不到 '{meta['total_label']}' 關鍵字列 (請檢查B欄)"
     total_row_orig = total_cell
     
     sec_start = {}
@@ -566,10 +572,10 @@ def generate_excel_from_template(format_type, start_dt, end_dt, client_name, pro
 
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue()
+    return out.getvalue(), None
 
 # =========================================================
-# 6. HTML Preview (Fixed: Missing function added)
+# 6. HTML Preview
 # =========================================================
 def load_font_base64():
     font_path = "NotoSansTC-Regular.ttf"
@@ -870,12 +876,10 @@ if config:
     p_str = f"{'、'.join([f'{s}秒' for s in sorted(list(set(r['seconds'] for r in rows)))])} {product_name}"
     rem = get_remarks_text(sign_deadline, billing_month, payment_date)
 
-    # HTML Preview
     html_preview = generate_html_preview(rows, days_count, start_date, end_date, client_name, p_str, format_type, rem, total_list_accum, grand_total, total_budget_input, prod_cost)
     st.components.v1.html(html_preview, height=700, scrolling=True)
 
     with st.expander("💡 系統運算邏輯說明 (Debug Panel)", expanded=False):
-        st.markdown("#### 1. 本次預算分配詳細運算")
         for log in logs:
             st.markdown(f"### {log.get('Media')}")
             st.markdown(f"- **預算**: {log.get('Budget')}")
@@ -888,7 +892,7 @@ if config:
     if rows:
         if template_bytes:
             try:
-                xlsx = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes, total_list_accum)
+                xlsx, err_msg = generate_excel_from_template(format_type, start_date, end_date, client_name, p_str, rows, rem, template_bytes, total_list_accum)
                 if xlsx:
                     st.download_button("📥 下載擬真 Excel", xlsx, f"Cue_{safe_filename(client_name)}.xlsx")
                     
@@ -899,6 +903,8 @@ if config:
                         st.warning(f"本地轉檔失敗 ({err})，使用網頁渲染版")
                         pdf_bytes, err = html_to_pdf_weasyprint(html_preview)
                         if pdf_bytes: st.download_button("📥 下載 PDF (Web版)", pdf_bytes, f"Cue_{safe_filename(client_name)}.pdf")
+                else:
+                    st.error(f"❌ 無法生成 Excel，可能原因：{err_msg}")
             except Exception as e:
                 st.error(f"Excel 產出錯誤: {e}")
         else:
